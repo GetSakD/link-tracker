@@ -1118,9 +1118,10 @@ async function trackPlanVehicles() {
         (r.list || []).forEach(function (s) {
           var ok = (s.routeIds || []).some(function (id) { return sameRoute(routeName(S.busRoutes[id]), l.routeShortName || l.displayName); });
           var d = dist(s, l.from);
-          if (ok && d < bd) { bd = d; best = s.id; }
+          if (ok && d < bd) { bd = d; best = s; }
         });
-        l._stopId = best;
+        l._stopId = best ? best.id : null;
+        l._stop = best ? { name: best.name, code: best.code || '', dir: best.direction || '', lat: best.lat, lon: best.lon } : null;
       }
       if (!l._stopId) continue;
       var ar = await oba('arrivals-and-departures-for-stop/' + encodeURIComponent(l._stopId) + '.json', { minutesBefore: 10, minutesAfter: 150 });
@@ -1136,7 +1137,8 @@ async function trackPlanVehicles() {
         var sch = pick.scheduledDepartureTime || pick.scheduledArrivalTime, pr = live ? (pick.predictedDepartureTime || pick.predictedArrivalTime) : 0;
         var ts = pick.tripStatus || {};
         l._live = { live: live, t: pr || sch, dev: live ? Math.round((pr - sch) / 1000) : 0, stopsAway: typeof pick.numberOfStopsAway === 'number' ? pick.numberOfStopsAway : null,
-          pos: ts.position && (live || ts.predicted) ? { lat: ts.position.lat, lon: ts.position.lon } : null, canceled: /cancel/i.test(String(ts.status || '')), routeId: pick.routeId };
+          pos: ts.position && (live || ts.predicted) ? { lat: ts.position.lat, lon: ts.position.lon } : null, canceled: /cancel/i.test(String(ts.status || '')), routeId: pick.routeId,
+          near: ((S.stopInfo[ts.closestStop] || S.stopInfo[ts.nextStop] || {}).name) || '' };
       } else l._live = null;
     } catch (e) { /* keep the timetable version of this step */ }
     if (S.plan !== P || P.sel !== sel) return;
@@ -1159,7 +1161,50 @@ function updatePlanMarkers() {
     } else tweenMarker(m, l._live.pos);
   });
   Object.keys(planMarkers).forEach(function (k) { if (!keep[k]) { planMarkers[k].remove(); delete planMarkers[k]; } });
+  updateWaitMarker();
+  var fr = firstRide();
+  if (S.follow && fr && fr._live && fr._live.pos && map) map.easeTo({ center: [fr._live.pos.lon, fr._live.pos.lat], zoom: Math.max(map.getZoom(), 14), duration: 900 });
 }
+
+var waitMarker = null;
+function firstRide() {
+  var P = S.plan, it = P && P.its && P.its[P.sel];
+  if (!it) return null;
+  return it.legs.filter(function (l) { return l.mode !== 'WALK' && Date.parse(l.endTime) > now(); })[0] || null;
+}
+function updateWaitMarker() {
+  var l = firstRide(), at = l && (l._stop || l.from);
+  if (!map || !l || !at || Date.parse(l.startTime) < now() - 60000) { if (waitMarker) { waitMarker.remove(); waitMarker = null; } return; }
+  if (!waitMarker) {
+    var el = document.createElement('div');
+    el.className = 'waitmk';
+    el.innerHTML = '<span>' + BUSSVG + '</span>Wait here';
+    waitMarker = new maplibregl.Marker({ element: el, anchor: 'bottom' }).setLngLat([at.lon, at.lat]).addTo(map);
+  } else waitMarker.setLngLat([at.lon, at.lat]);
+}
+function rideCard() {
+  var l = firstRide(); if (!l) return '';
+  var v = l._live, st = l._stop, name = l.routeShortName || l.displayName || 'bus';
+  var kind = l.mode === 'BUS' ? 'bus' : 'train';
+  var wait = st ? st.name : l.from.name, meta = [];
+  if (st && st.code) meta.push('Stop ' + st.code);
+  if (st && DIRS_TXT[st.dir]) meta.push(DIRS_TXT[st.dir]);
+  var lines = '';
+  if (v === undefined) lines = 'Finding your ' + kind + ' live…';
+  else if (!v) lines = 'No live signal for this ' + kind + ' yet. It\'s scheduled to leave at <b>' + clock(Date.parse(l.startTime)) + '</b>.';
+  else if (v.canceled) lines = '<span style="color:var(--red)">This trip is canceled.</span> Pick another route above.';
+  else {
+    var where = v.pos ? (v.stopsAway > 0 ? v.stopsAway + (v.stopsAway === 1 ? ' stop' : ' stops') + ' away' : 'arriving now') +
+      (v.near ? ', near <b>' + esc(v.near) + '</b>' : '') + (v.pos ? ' (' + miles(dist(v.pos, st || l.from)) + ')' : '') : 'not on the road yet';
+    lines = 'Your <b>' + esc(name) + '</b> is ' + where + '. ' + chip(v.dev, v.live, false) + '<br>Reaches your stop in <b>' + cdHTML(v.t) + '</b> · ' + clock(v.t);
+  }
+  return '<div class="ride">' + '<div class="ride-top">' + legBadge(l) + '<div class="ride-h">Your next ' + kind + '</div>' +
+    (v && v.pos ? '<button class="pill-btn' + (S.follow ? '' : ' tinted') + '" type="button" data-act="plan-follow">' + (S.follow ? 'Following' : 'Follow') + '</button>' : '') + '</div>' +
+    '<div class="ride-l">' + lines + '</div>' +
+    '<div class="ride-w"><span class="stop-ico">' + BUSSVG + '</span><div><b>Wait at ' + esc(wait) + '</b>' + (meta.length ? '<small>' + esc(meta.join(' · ')) + '</small>' : '') +
+    (S.me ? '<small>' + miles(dist(S.me, st || l.from)) + ' from you</small>' : '') + '</div></div></div>';
+}
+
 function liveLine(l) {
   var v = l._live;
   if (v === undefined) return '<span class="chip sched">Checking live…</span>';
@@ -1180,6 +1225,7 @@ function itLegs(it) {
 }
 function renderPlanSheet() {
   var P = S.plan, html = '';
+  if (P && !P.loading) updateWaitMarker();
   html += '<div class="drag-zone"><div class="d-head"><div class="d-badge" style="background:var(--blue)"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M21.7 11.3l-9-9a1 1 0 0 0-1.4 0l-9 9a1 1 0 0 0 0 1.4l9 9a1 1 0 0 0 1.4 0l9-9a1 1 0 0 0 0-1.4zM14 14.5V12h-4v3H8v-4a1 1 0 0 1 1-1h5V7.5l3.5 3.5-3.5 3.5z"/></svg></div>' +
     '<div class="d-title"><h2>To ' + esc(P.to) + '</h2><div>From ' + esc(P.from) + ' · ' + (P.mode === 'bus' ? 'Bus only' : 'Bus & train') + '</div></div>' +
     '<button class="close" type="button" data-act="plan-close" aria-label="Close directions"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button></div></div>';
@@ -1187,6 +1233,7 @@ function renderPlanSheet() {
   else if (P.err) html += '<div class="empty">' + esc(P.err) + '</div>';
   else if (!P.its.length) html += '<div class="empty">No trips found right now.' + (P.mode === 'bus' ? ' Try “Bus & train”.' : '') + '</div><div class="group"><button class="cell" type="button" data-act="plan-edit"><span class="v" style="color:var(--blue)">Change trip</span></button></div>';
   else {
+    html += rideCard();
     html += '<div class="sec"><span>Routes</span><button type="button" data-act="plan-edit" style="color:var(--blue);text-transform:none;font-size:15px">Edit</button></div><div class="group">';
     P.its.forEach(function (it, i) {
       var first = it.legs.filter(function (l) { return l.mode !== 'WALK'; })[0];
@@ -1395,7 +1442,8 @@ function wire() {
     else if (act === 'close') { S.selected = null; S.follow = false; renderSheet(); }
     else if (act === 'bus-close') { S.busSel = null; S.busArr = null; updateBusLayer(); updateBusMarkers(); renderSheet(); }
     else if (act === 'bus-locate') startLocate(true);
-    else if (act === 'plan-close') clearPlan();
+    else if (act === 'plan-close') { S.follow = false; clearPlan(); }
+    else if (act === 'plan-follow') { S.follow = !S.follow; if (S.follow && S.detent === 'full') setDetent('mid'); updatePlanMarkers(); renderSheet(); }
     else if (act === 'plan-edit') openDirs();
     else if (act === 'dirs') openDirs();
   });
