@@ -395,6 +395,7 @@ function initMap() {
     dragRotate: false, pitchWithRotate: false, touchPitch: false, maxZoom: 17.5, minZoom: 8, fadeDuration: 120
   });
   map.touchZoomRotate.disableRotation();
+  map.once('load', function () { var at = document.querySelector('.maplibregl-ctrl-attrib'); if (at) at.classList.remove('maplibregl-compact-show'); });
   map.on('style.load', function () { tidyStyle(); addOverlays(); addBusLayers(); addPlanLayers(); mapReady = true; applyModeLayers(); applyPadding(); if (S.mode === 'buses') scheduleStopFetch(); });
   map.on('dragstart', function () { if (S.follow) { S.follow = false; renderSheet(); } });
   map.on('moveend', function () { if (S.mode === 'buses') scheduleStopFetch(); });
