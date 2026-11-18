@@ -617,7 +617,7 @@ function chip(dev, live, canceled) {
   if (m > 0) return '<span class="chip late"><i></i>' + m + ' min late</span>';
   return '<span class="chip early"><i></i>' + (-m) + ' min early</span>';
 }
-function cdHTML(t) { return '<span data-cd="' + t + '"></span>'; }
+function cdHTML(t) { var m = minsText(t); return '<span data-cd="' + t + '">' + m.n + (m.u ? '<small>' + m.u + '</small>' : '') + '</span>'; }
 function minsText(t) {
   var m = Math.round((t - now()) / 60000);
   if (m <= 0) return { n: 'Now', u: '' };
