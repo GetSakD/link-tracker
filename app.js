@@ -496,7 +496,8 @@ function fitTrip(animate) {
   if (y && y.v.cur) pts.push([y.v.cur.lon, y.v.cur.lat]);
   var minX = Math.min.apply(null, pts.map(function (p) { return p[0]; })), maxX = Math.max.apply(null, pts.map(function (p) { return p[0]; }));
   var minY = Math.min.apply(null, pts.map(function (p) { return p[1]; })), maxY = Math.max.apply(null, pts.map(function (p) { return p[1]; }));
-  map.fitBounds([[minX, minY], [maxX, maxY]], { padding: { top: topInset() + 30, bottom: sheetVisible() + 40, left: 40, right: 90 }, maxZoom: 14.5, duration: animate ? 900 : 0 });
+  applyPadding();
+  map.fitBounds([[minX, minY], [maxX, maxY]], { padding: { top: 30, bottom: 30, left: 36, right: 30 }, maxZoom: 14.5, duration: animate ? 900 : 0 });
 }
 function trainEl(v) {
   var outer = document.createElement('div'), el = document.createElement('div');
@@ -532,7 +533,7 @@ function frame() {
     var v = S.veh[k], p = locateTrain(v, t);
     if (!p) continue;
     v.cur = p;
-    if (map && S.view === 'map') {
+    if (map && S.view === 'map' && S.mode === 'trains') {
       var cls = 'tr' + (k === yourId ? ' you' : '') + (v.predicted ? '' : ' nogps') + (isUp(v.dirId) === dirUp || k === yourId ? '' : ' other') + (S.selected === k ? ' sel' : '');
       if (!v.marker) { v.marker = new maplibregl.Marker({ element: trainEl(v), anchor: 'center' }).setLngLat([p.lon, p.lat]).addTo(map); lastFrameSig[k] = null; }
       else v.marker.setLngLat([p.lon, p.lat]);
@@ -667,7 +668,7 @@ function renderSheet() {
   }
   if (S.alerts.length) {
     var al = S.alerts[0];
-    html += '<details class="alert"><summary>⚠︎ ' + esc(al.summary.value) + (S.alerts.length > 1 ? ' (+' + (S.alerts.length - 1) + ' more)' : '') + '</summary>' +
+    html += '<details class="alert"' + (S.alertOpen ? ' open' : '') + '><summary>⚠︎ ' + esc(al.summary.value) + (S.alerts.length > 1 ? ' (+' + (S.alerts.length - 1) + ' more)' : '') + '</summary>' +
       S.alerts.slice(0, 3).map(function (s) { return '<p>' + esc((s.description && s.description.value) || s.summary.value) + '</p>'; }).join('') + '</details>';
   }
   html += '<div class="sec">Trip</div><div class="trip-wrap"><div class="group trip">' +
@@ -1083,16 +1084,18 @@ function addPlanLayers() {
   map.addLayer({ id: 'lt-plan-pts', type: 'circle', source: 'lt-plan-pts', paint: { 'circle-radius': ['case', ['==', ['get', 'end'], 1], 8, 6], 'circle-color': ['case', ['==', ['get', 'end'], 1], '#FF3B30', halo], 'circle-stroke-color': ['case', ['==', ['get', 'end'], 1], halo, ['get', 'color']], 'circle-stroke-width': 3 } });
 }
 function drawPlan() {
+  document.body.classList.toggle('plan-on', !!S.plan);
   if (!map || !mapReady) return;
   addPlanLayers();
+  applyPadding();
   var g = planGeo(), coords = [];
   g.lines.features.forEach(function (f) { coords = coords.concat(f.geometry.coordinates); });
   if (!coords.length) return;
   var xs = coords.map(function (c) { return c[0]; }), ys = coords.map(function (c) { return c[1]; });
   map.fitBounds([[Math.min.apply(null, xs), Math.min.apply(null, ys)], [Math.max.apply(null, xs), Math.max.apply(null, ys)]],
-    { padding: { top: topInset() + 30, bottom: sheetVisible() + 30, left: 40, right: 70 }, maxZoom: 16, duration: 800 });
+    { padding: { top: 30, bottom: 30, left: 36, right: 30 }, maxZoom: 16, duration: 800 });
 }
-function clearPlan() { S.plan = null; if (map && map.getSource('lt-plan')) { addPlanLayers(); } renderSheet(); }
+function clearPlan() { S.plan = null; document.body.classList.remove('plan-on'); if (map && map.getSource('lt-plan')) { addPlanLayers(); } renderSheet(); }
 function itLegs(it) {
   return it.legs.map(function (l) {
     if (l.mode === 'WALK') return legMin(l) < 2 && it.legs.length > 1 ? '' : '<span class="wk">' + WALKSVG + legMin(l) + '</span>';
@@ -1292,6 +1295,7 @@ document.addEventListener('visibilitychange', function () { if (document.visibil
 
 /* ================= wiring ================= */
 function wire() {
+  sheetBody.addEventListener('toggle', function (e) { if (e.target.matches && e.target.matches('details.alert')) S.alertOpen = e.target.open; }, true);
   sheetBody.addEventListener('click', function (e) {
     var itb = e.target.closest('[data-it]'); if (itb && S.plan) { S.plan.sel = Number(itb.getAttribute('data-it')); drawPlan(); renderSheet(); return; }
     var st = e.target.closest('[data-stop]'); if (st) { selectStop(st.getAttribute('data-stop')); return; }
