@@ -980,5 +980,9 @@ function wire() {
   } else if (store.get('locOk', false)) startLocate(false);
   if (S.line && (!S.from || !S.to)) openPicker(!S.from ? 'from' : 'to', true);
   lastAuto = Date.now(); refresh(false);
-  if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(function () {});
+  if ('serviceWorker' in navigator && location.protocol === 'https:') {
+    var hadController = !!navigator.serviceWorker.controller, reloaded = false;
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(function (reg) { reg.update(); }).catch(function () {});
+    navigator.serviceWorker.addEventListener('controllerchange', function () { if (hadController && !reloaded) { reloaded = true; location.reload(); } });
+  }
 })();

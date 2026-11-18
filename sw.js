@@ -1,38 +1,41 @@
-/* Link Tracker service worker: opens instantly, keeps the map tiles you've seen. Live train data always comes from the network. */
-var VERSION = 'lt-v3.0.1';
-var SHELL = ['./', './index.html', './app.js', './manifest.webmanifest', './apple-touch-icon.png', './icon-512.png',
-  'https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js', 'https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css'];
+/* Link Tracker service worker.
+   The app itself (HTML/JS) always comes from the network first, so you never get stuck on an old version;
+   the saved copy is only used when you're offline. Map tiles are cached for speed. Live data is never cached. */
+var VERSION = 'lt-v3.1.0';
 var TILE_CACHE = 'lt-tiles-1', TILE_MAX = 600;
+var LIB = ['https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js', 'https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css'];
 
 self.addEventListener('install', function (e) {
-  e.waitUntil(caches.open(VERSION).then(function (c) { return Promise.all(SHELL.map(function (u) { return c.add(u).catch(function () {}); })); }).then(function () { return self.skipWaiting(); }));
+  e.waitUntil(caches.open(VERSION).then(function (c) { return Promise.all(LIB.map(function (u) { return c.add(u).catch(function () {}); })); }).then(function () { return self.skipWaiting(); }));
 });
 self.addEventListener('activate', function (e) {
   e.waitUntil(caches.keys().then(function (keys) {
     return Promise.all(keys.filter(function (k) { return k !== VERSION && k !== TILE_CACHE; }).map(function (k) { return caches.delete(k); }));
   }).then(function () { return self.clients.claim(); }));
 });
-function trimTiles() {
-  caches.open(TILE_CACHE).then(function (c) { c.keys().then(function (keys) { if (keys.length > TILE_MAX) for (var i = 0; i < keys.length - TILE_MAX; i++) c.delete(keys[i]); }); });
+function netFirst(req) {
+  return caches.open(VERSION).then(function (c) {
+    var timeout = new Promise(function (_, rej) { setTimeout(function () { rej(new Error('slow')); }, 4000); });
+    return Promise.race([fetch(req, { cache: 'no-store' }), timeout]).then(function (res) {
+      if (res && res.ok) c.put(req, res.clone());
+      return res;
+    }).catch(function () { return c.match(req, { ignoreSearch: true }).then(function (hit) { return hit || fetch(req); }); });
+  });
 }
 self.addEventListener('fetch', function (e) {
   var req = e.request;
   if (req.method !== 'GET') return;
   var url = new URL(req.url);
-  if (url.hostname === 'api.pugetsound.onebusaway.org') return;               // live data: always network
-  if (url.hostname === 'tiles.openfreemap.org') {                              // map: cache first, refresh in background
-    e.respondWith(caches.open(TILE_CACHE).then(function (c) {
-      return c.match(req).then(function (hit) {
-        var net = fetch(req).then(function (res) { if (res.ok) { c.put(req, res.clone()); trimTiles(); } return res; }).catch(function () { return hit; });
-        return hit || net;
-      });
-    }));
+  if (url.hostname === 'api.pugetsound.onebusaway.org') return;                 // live data: always network
+  if (url.origin === self.location.origin) { e.respondWith(netFirst(req)); return; }   // the app: newest first
+  if (url.hostname === 'unpkg.com') {                                             // pinned library version: cache first
+    e.respondWith(caches.match(req).then(function (hit) { return hit || fetch(req).then(function (res) { if (res.ok) caches.open(VERSION).then(function (c) { c.put(req, res.clone()); }); return res; }); }));
     return;
   }
-  if (url.origin === self.location.origin || url.hostname === 'unpkg.com') {   // app shell: instant, then update
-    e.respondWith(caches.open(VERSION).then(function (c) {
-      return c.match(req, { ignoreSearch: url.origin === self.location.origin }).then(function (hit) {
-        var net = fetch(req).then(function (res) { if (res.ok) c.put(req, res.clone()); return res; }).catch(function () { return hit; });
+  if (url.hostname === 'tiles.openfreemap.org') {                                // map: cache first, refresh in background
+    e.respondWith(caches.open(TILE_CACHE).then(function (c) {
+      return c.match(req).then(function (hit) {
+        var net = fetch(req).then(function (res) { if (res.ok) { c.put(req, res.clone()); c.keys().then(function (k) { for (var i = 0; i < k.length - TILE_MAX; i++) c.delete(k[i]); }); } return res; }).catch(function () { return hit; });
         return hit || net;
       });
     }));
