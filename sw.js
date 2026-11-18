@@ -1,5 +1,5 @@
 /* Link Tracker service worker: opens instantly, keeps the map tiles you've seen. Live train data always comes from the network. */
-var VERSION = 'lt-v3.0.0';
+var VERSION = 'lt-v3.0.1';
 var SHELL = ['./', './index.html', './app.js', './manifest.webmanifest', './apple-touch-icon.png', './icon-512.png',
   'https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js', 'https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css'];
 var TILE_CACHE = 'lt-tiles-1', TILE_MAX = 600;

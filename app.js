@@ -547,7 +547,7 @@ function updateTag() {
   if (!y || !n || !y.v.el) return;
   var tag = y.v.el.querySelector('.tag'); if (!tag) return;
   var m = Math.round((n.t - now()) / 60000);
-  tag.textContent = y.prior ? 'Your train (finishing a trip)' : 'Your train · ' + (m <= 0 ? 'now' : m + ' min');
+  tag.textContent = 'Your train · ' + (m <= 0 ? 'now' : m + ' min');
 }
 
 /* ================= bottom sheet ================= */
@@ -642,7 +642,11 @@ function renderSheet() {
       '<div class="hero-info"><div class="hero-title">To ' + esc(S.to) + '</div><div class="hero-sub">' + chip(n.dev, n.live, false) +
       ' <span class="num">' + clock(n.t) + (arrive ? ' → ' + clock(arrive) : '') + '</span></div></div></div>';
     var wh, est = !(y && y.v.predicted);
-    if (y && y.v.cur) wh = (y.prior ? 'Finishing its last trip, ' : (y.v.predicted ? 'Your train is ' : 'Estimated ')) + whereText(y.v) + (n.stopsAway > 0 && !y.prior ? ' · ' + n.stopsAway + (n.stopsAway === 1 ? ' stop away' : ' stops away') : '');
+    if (y && y.v.cur) {
+      var w = whereText(y.v);
+      if (y.prior) wh = /^at /.test(w) ? 'Your train is ' + w + ', getting ready to leave' : 'Your train is finishing another trip, now ' + w;
+      else wh = (y.v.predicted ? 'Your train is ' : 'Estimated: your train is ') + w + (n.stopsAway > 0 ? ' · ' + n.stopsAway + (n.stopsAway === 1 ? ' stop away' : ' stops away') : '');
+    }
     else wh = 'Your train hasn\'t started its trip yet.';
     html += '<div class="where' + (est ? ' est' : '') + '"><span class="pin"></span><span>' + wh + '</span>' +
       (y && y.v.cur ? '<button class="pill-btn' + (S.follow && !S.selected ? '' : ' tinted') + '" type="button" data-act="follow">' + (S.follow && !S.selected ? 'Following' : 'Follow') + '</button>' : '') + '</div></div>';
