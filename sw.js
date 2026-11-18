@@ -1,7 +1,7 @@
 /* Link Tracker service worker.
    The app itself (HTML/JS) always comes from the network first, so you never get stuck on an old version;
    the saved copy is only used when you're offline. Map tiles are cached for speed. Live data is never cached. */
-var VERSION = 'lt-v3.3.2';
+var VERSION = 'lt-v3.4.0';
 var TILE_CACHE = 'lt-tiles-1', TILE_MAX = 600;
 var LIB = ['https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js', 'https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css'];
 

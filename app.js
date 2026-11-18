@@ -850,9 +850,10 @@ function addBusLayers() {
 function updateBusLayer() { if (map && mapReady && map.getSource('lt-bus')) map.getSource('lt-bus').setData(busGeo()); }
 function applyModeLayers() {
   if (!map || !mapReady) return;
-  var bus = S.mode === 'buses';
+  var bus = S.mode === 'buses' && !S.plan;
   ['lt-route-case', 'lt-route', 'lt-trip', 'lt-st', 'lt-st-label', 'lt-st-label-end'].forEach(function (id) { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', bus ? 'none' : 'visible'); });
   ['lt-bus', 'lt-bus-label', 'lt-bus-sel'].forEach(function (id) { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', bus ? 'visible' : 'none'); });
+  if (S.plan && S.mode === 'buses') ['lt-route-case', 'lt-route', 'lt-trip', 'lt-st', 'lt-st-label', 'lt-st-label-end'].forEach(function (id) { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'none'); });
 }
 function setMode(m) {
   if (m === S.mode) return;
@@ -1058,6 +1059,7 @@ async function runPlan() {
     S.plan = { mode: D.mode, from: S.plan.from, to: S.plan.to, err: e.message || 'The trip planner isn\'t available right now.', its: [] };
   }
   drawPlan(); renderSheet();
+  trackPlanVehicles();
 }
 function planGeo() {
   var fc = { type: 'FeatureCollection', features: [] }, pts = { type: 'FeatureCollection', features: [] };
@@ -1088,6 +1090,7 @@ function drawPlan() {
   document.body.classList.toggle('plan-on', !!S.plan);
   if (!map || !mapReady) return;
   addPlanLayers();
+  applyModeLayers();
   applyPadding();
   var g = planGeo(), coords = [];
   g.lines.features.forEach(function (f) { coords = coords.concat(f.geometry.coordinates); });
@@ -1096,7 +1099,79 @@ function drawPlan() {
   map.fitBounds([[Math.min.apply(null, xs), Math.min.apply(null, ys)], [Math.max.apply(null, xs), Math.max.apply(null, ys)]],
     { padding: { top: 30, bottom: 30, left: 36, right: 30 }, maxZoom: 16, duration: 800 });
 }
-function clearPlan() { S.plan = null; document.body.classList.remove('plan-on'); if (map && map.getSource('lt-plan')) { addPlanLayers(); } renderSheet(); }
+function clearPlan() { S.plan = null; document.body.classList.remove('plan-on'); updatePlanMarkers(); applyModeLayers(); if (map && map.getSource('lt-plan')) { addPlanLayers(); } renderSheet(); }
+
+/* live vehicles for the chosen route: match each ride to the real bus/train in the live feed */
+var planMarkers = {};
+function normRoute(s) { return String(s || '').toLowerCase().replace(/swift|line|route|[^a-z0-9]/g, ''); }
+function sameRoute(a, b) { var x = normRoute(a), y = normRoute(b); return !!x && !!y && (x === y || x.indexOf(y) >= 0 || y.indexOf(x) >= 0); }
+async function trackPlanVehicles() {
+  var P = S.plan; if (!P || !P.its || P.sel == null) return;
+  var it = P.its[P.sel], sel = P.sel;
+  var legs = it.legs.filter(function (l) { return l.mode !== 'WALK' && Date.parse(l.endTime) > now(); });
+  for (var i = 0; i < legs.length; i++) {
+    var l = legs[i];
+    try {
+      if (l._stopId === undefined) {
+        var r = await oba('stops-for-location.json', { lat: l.from.lat.toFixed(6), lon: l.from.lon.toFixed(6), radius: 150, maxCount: 30 });
+        var best = null, bd = Infinity;
+        (r.list || []).forEach(function (s) {
+          var ok = (s.routeIds || []).some(function (id) { return sameRoute(routeName(S.busRoutes[id]), l.routeShortName || l.displayName); });
+          var d = dist(s, l.from);
+          if (ok && d < bd) { bd = d; best = s.id; }
+        });
+        l._stopId = best;
+      }
+      if (!l._stopId) continue;
+      var ar = await oba('arrivals-and-departures-for-stop/' + encodeURIComponent(l._stopId) + '.json', { minutesBefore: 10, minutesAfter: 150 });
+      var target = Date.parse(l.scheduledStartTime || l.startTime), pick = null, pd = 6 * 60000;
+      ((ar.entry && ar.entry.arrivalsAndDepartures) || []).forEach(function (x) {
+        var rn = x.routeShortName || routeName(S.busRoutes[x.routeId]);
+        if (!sameRoute(rn, l.routeShortName || l.displayName)) return;
+        var d = Math.abs((x.scheduledDepartureTime || x.scheduledArrivalTime) - target);
+        if (d < pd) { pd = d; pick = x; }
+      });
+      if (pick) {
+        var live = pick.predicted === true && ((pick.predictedDepartureTime || 0) > 0 || (pick.predictedArrivalTime || 0) > 0);
+        var sch = pick.scheduledDepartureTime || pick.scheduledArrivalTime, pr = live ? (pick.predictedDepartureTime || pick.predictedArrivalTime) : 0;
+        var ts = pick.tripStatus || {};
+        l._live = { live: live, t: pr || sch, dev: live ? Math.round((pr - sch) / 1000) : 0, stopsAway: typeof pick.numberOfStopsAway === 'number' ? pick.numberOfStopsAway : null,
+          pos: ts.position && (live || ts.predicted) ? { lat: ts.position.lat, lon: ts.position.lon } : null, canceled: /cancel/i.test(String(ts.status || '')), routeId: pick.routeId };
+      } else l._live = null;
+    } catch (e) { /* keep the timetable version of this step */ }
+    if (S.plan !== P || P.sel !== sel) return;
+  }
+  updatePlanMarkers();
+  if (S.plan === P) renderSheet();
+}
+function updatePlanMarkers() {
+  var P = S.plan, keep = {};
+  var it = P && P.its && P.its[P.sel];
+  if (map && it) it.legs.forEach(function (l, i) {
+    if (l.mode === 'WALK' || !l._live || !l._live.pos || l._live.canceled || Date.parse(l.endTime) < now()) return;
+    var k = P.sel + ':' + i; keep[k] = 1;
+    var m = planMarkers[k];
+    if (!m) {
+      var el = document.createElement('div');
+      el.className = 'busmk'; el.style.background = legColor(l); el.style.color = legText(l); el.textContent = l.routeShortName || l.displayName || '';
+      el.setAttribute('aria-label', 'Your ' + (l.routeShortName || '') + ' right now');
+      m = planMarkers[k] = new maplibregl.Marker({ element: el, anchor: 'center' }).setLngLat([l._live.pos.lon, l._live.pos.lat]).addTo(map);
+    } else tweenMarker(m, l._live.pos);
+  });
+  Object.keys(planMarkers).forEach(function (k) { if (!keep[k]) { planMarkers[k].remove(); delete planMarkers[k]; } });
+}
+function liveLine(l) {
+  var v = l._live;
+  if (v === undefined) return '<span class="chip sched">Checking live…</span>';
+  if (!v) return '<span class="chip sched">Scheduled</span>';
+  if (v.canceled) return '<span class="chip cancel">Canceled</span>';
+  var bits = [chip(v.dev, v.live, false)];
+  if (v.live && v.stopsAway > 0) bits.push(v.stopsAway + (v.stopsAway === 1 ? ' stop away' : ' stops away'));
+  else if (!v.pos) bits.push('not on the road yet');
+  bits.push('departs ' + clock(v.t));
+  return bits.join(' · ');
+}
+
 function itLegs(it) {
   return it.legs.map(function (l) {
     if (l.mode === 'WALK') return legMin(l) < 2 && it.legs.length > 1 ? '' : '<span class="wk">' + WALKSVG + legMin(l) + '</span>';
@@ -1131,7 +1206,7 @@ function renderPlanSheet() {
         } else {
           var n = (l.intermediateStops || []).length + 1;
           html += '<div class="step"><div class="ic">' + legBadge(l, true) + '</div><div class="tx">Take ' + esc(l.routeShortName || l.displayName || 'the ' + l.mode.toLowerCase()) + (l.headsign ? ' toward ' + esc(l.headsign) : '') +
-            '<small>Board at ' + esc(l.from.name) + ' · ride ' + n + (n === 1 ? ' stop' : ' stops') + ' (' + legMin(l) + ' min)<br>Get off at ' + esc(l.to.name) + ' · ' + clock(Date.parse(l.endTime)) + '</small></div>' +
+            '<small style="margin-top:4px">' + liveLine(l) + '</small><small>Board at ' + esc(l.from.name) + ' · ride ' + n + (n === 1 ? ' stop' : ' stops') + ' (' + legMin(l) + ' min)<br>Get off at ' + esc(l.to.name) + ' · ' + clock(Date.parse(l.endTime)) + '</small></div>' +
             '<div class="tm num">' + clock(Date.parse(l.startTime)) + '</div></div>';
         }
       });
@@ -1255,6 +1330,11 @@ async function refresh(manual) {
   if (S.busy) return;
   S.busy = true;
   try {
+    if (S.plan && S.plan.its) {
+      await trackPlanVehicles();
+      S.lastOk = now(); S.err = null;
+      return;
+    }
     if (S.mode === 'buses') {
       if (S.busSel) await loadStopArrivals();
       S.lastOk = now(); S.err = null;
@@ -1298,7 +1378,7 @@ document.addEventListener('visibilitychange', function () { if (document.visibil
 function wire() {
   sheetBody.addEventListener('toggle', function (e) { if (e.target.matches && e.target.matches('details.alert')) S.alertOpen = e.target.open; }, true);
   sheetBody.addEventListener('click', function (e) {
-    var itb = e.target.closest('[data-it]'); if (itb && S.plan) { S.plan.sel = Number(itb.getAttribute('data-it')); drawPlan(); renderSheet(); return; }
+    var itb = e.target.closest('[data-it]'); if (itb && S.plan) { S.plan.sel = Number(itb.getAttribute('data-it')); drawPlan(); renderSheet(); updatePlanMarkers(); trackPlanVehicles(); return; }
     var st = e.target.closest('[data-stop]'); if (st) { selectStop(st.getAttribute('data-stop')); return; }
     var rt = e.target.closest('[data-route]'); if (rt) { S.busFilter = rt.getAttribute('data-route'); renderSheet(); updateBusMarkers(); return; }
     var b = e.target.closest('[data-act]'); if (!b) return;
