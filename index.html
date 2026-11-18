@@ -229,6 +229,24 @@ details.alert p{margin:8px 0 0;color:var(--label);white-space:pre-line;font-size
 .chips button[aria-pressed="true"]{background:var(--label);color:var(--bg)}
 .busmk{min-width:32px;height:24px;padding:0 6px;border-radius:7px;background:#30B0C7;color:#fff;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.3);font:700 11px/20px -apple-system,system-ui,sans-serif;text-align:center;white-space:nowrap;cursor:pointer}
 .busmk.est{opacity:.8;border-style:dashed}
+/* directions */
+.ctl button#btnDir{color:var(--blue)}
+.it{display:block;width:100%;text-align:left;padding:12px 14px;position:relative}
+.it+.it::before{content:"";position:absolute;top:0;left:14px;right:0;height:.5px;background:var(--sep)}
+.it .row1{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+.it .dur{font-size:20px;font-weight:700}
+.it .tt{font-size:14px;color:var(--label2)}
+.it .legs{display:flex;align-items:center;flex-wrap:wrap;gap:5px;margin-top:8px;font-size:13px;color:var(--label2)}
+.it .legs .wk{display:inline-flex;align-items:center;gap:2px}
+.it .sub{font-size:13px;color:var(--label2);margin-top:6px}
+.it.on{background:rgba(10,132,255,.08)}
+.step{display:flex;gap:12px;padding:11px 14px;position:relative}
+.step+.step::before{content:"";position:absolute;top:0;left:52px;right:0;height:.5px;background:var(--sep)}
+.step .ic{flex:none;width:28px;display:flex;justify-content:center;padding-top:2px}
+.step .tx{flex:1;min-width:0;font-size:15px;line-height:1.35}
+.step .tx small{display:block;font-size:13px;color:var(--label2);margin-top:2px}
+.step .tm{flex:none;font-size:14px;color:var(--label2)}
+.walk-ico{width:24px;height:24px;border-radius:12px;background:var(--fill);color:var(--label2);display:flex;align-items:center;justify-content:center}
 @media (prefers-reduced-motion: reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
@@ -242,6 +260,9 @@ details.alert p{margin:8px 0 0;color:var(--label);white-space:pre-line;font-size
     <button type="button" role="tab" data-mode="buses" aria-selected="false">Buses</button>
   </div>
   <div class="ctl glass" role="group" aria-label="Map controls">
+    <button id="btnDir" type="button" aria-label="Directions">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M21.7 11.3l-9-9a1 1 0 0 0-1.4 0l-9 9a1 1 0 0 0 0 1.4l9 9a1 1 0 0 0 1.4 0l9-9a1 1 0 0 0 0-1.4zM14 14.5V12h-4v3H8v-4a1 1 0 0 1 1-1h5V7.5l3.5 3.5-3.5 3.5z"/></svg>
+    </button>
     <button id="btnLine" type="button" aria-pressed="false" aria-label="Line view">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M8 3v18"/><path d="M16 3v18"/><circle cx="8" cy="8" r="1.6" fill="currentColor"/><circle cx="16" cy="15" r="1.6" fill="currentColor"/></svg>
     </button>
@@ -273,6 +294,23 @@ details.alert p{margin:8px 0 0;color:var(--label);white-space:pre-line;font-size
     <div class="m-body">
       <label class="search"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg><input id="pickSearch" type="search" placeholder="Search stations" autocomplete="off" aria-label="Search stations"></label>
       <div id="pickList"></div>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="dirs" role="dialog" aria-modal="true" aria-labelledby="dirTitle">
+  <div class="card">
+    <div class="m-head"><button class="l" id="dirCancel" type="button">Cancel</button><h2 id="dirTitle">Directions</h2><button class="rr" id="dirGo" type="button">Route</button></div>
+    <div class="m-body">
+      <div class="group">
+        <button class="cell" type="button" id="dirFromBtn"><span class="dot-o"></span><span class="k">From</span><span class="v" id="dirFromTxt">My Location</span></button>
+        <button class="cell" type="button" id="dirToBtn"><span class="dot-d" style="background:var(--red)"></span><span class="k">To</span><span class="v" id="dirToTxt" style="color:var(--label2)">Choose destination</span></button>
+      </div>
+      <div class="sec">Use</div>
+      <div class="group"><div class="cell"><div class="seg" id="dirModes"><button type="button" data-m="all">Bus &amp; train</button><button type="button" data-m="bus">Bus only</button></div></div></div>
+      <div class="sec" id="dirSearchLabel">Search destination</div>
+      <label class="search"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg><input id="dirSearch" type="search" placeholder="Address, place or stop" autocomplete="off" aria-label="Search places"></label>
+      <div id="dirResults"></div>
     </div>
   </div>
 </div>
