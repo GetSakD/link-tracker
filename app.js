@@ -488,7 +488,8 @@ function tripBounds() {
 function topInset() { var t = $('.top'); return t ? t.getBoundingClientRect().bottom + 8 : 70; }
 function applyPadding() {
   if (!map) return;
-  map.setPadding({ top: topInset(), bottom: sheetVisible() + 12, left: 12, right: 64 });
+  if (document.body.classList.contains('side')) map.setPadding({ top: topInset(), bottom: 12, left: SIDE_W + 24, right: 64 });
+  else map.setPadding({ top: topInset(), bottom: sheetVisible() + 12, left: 12, right: 64 });
 }
 function fitTrip(animate) {
   if (!map) return;
@@ -566,13 +567,27 @@ function updateTag() {
 
 /* ================= bottom sheet ================= */
 var sheet, sheetBody;
+var SIDE_W = 360;
+function isSide() { return window.innerWidth >= 700; }
 function detentHeights() {
+  if (document.body.classList.contains('side')) return { peek: 0, mid: 0, full: 0 };
   var H = sheet.getBoundingClientRect().height || window.innerHeight * 0.92;
   return { peek: Math.min(206, H), mid: Math.round(Math.min(H, window.innerHeight * 0.52)), full: H };
 }
 function sheetVisible() { if (!sheet) return 0; var h = detentHeights(); return h[S.detent] || h.mid; }
 function setDetent(d, quiet) {
   S.detent = d;
+  var side = isSide();
+  document.body.classList.toggle('side', side);
+  ['peek', 'mid', 'full'].forEach(function (k) { document.body.classList.toggle('side-' + k, side && d === k); });
+  if (side) {
+    // Wide screens: the panel floats in the top-left corner (like Apple Maps on iPad/Mac)
+    document.body.classList.remove('sheet-full');
+    sheet.style.transform = '';
+    document.documentElement.style.setProperty('--sheet-h', '0px');
+    if (!quiet) setTimeout(applyPadding, 60);
+    return;
+  }
   document.body.classList.toggle('sheet-full', d === 'full');
   var h = detentHeights(), H = sheet.getBoundingClientRect().height;
   sheet.style.transform = 'translateY(' + Math.round(H - h[d]) + 'px)';
@@ -583,7 +598,11 @@ function initSheet() {
   sheet = $('#sheet'); sheetBody = $('#sheetBody');
   var startY = 0, startT = 0, base = 0, moved = false, lastY = 0, lastT = 0, vel = 0, active = false, onGrab = false;
   function cur() { var m = /translateY\((-?[\d.]+)px\)/.exec(sheet.style.transform || ''); return m ? Number(m[1]) : 0; }
+  $('#grab').addEventListener('click', function () {
+    if (document.body.classList.contains('side')) setDetent(S.detent === 'peek' ? 'mid' : 'peek');
+  });
   sheet.addEventListener('pointerdown', function (e) {
+    if (document.body.classList.contains('side')) return;
     if (!e.target.closest('.drag-zone') || e.target.closest('button,a,input,summary')) return;
     active = true; moved = false; onGrab = !!e.target.closest('.grab'); startY = lastY = e.clientY; startT = lastT = performance.now(); base = cur(); vel = 0;
     sheet.classList.add('dragging');
@@ -607,7 +626,8 @@ function initSheet() {
   sheet.addEventListener('pointerup', end);
   sheet.addEventListener('pointercancel', end);
   window.addEventListener('resize', function () { setDetent(S.detent, true); applyPadding(); });
-  setDetent('mid', true);
+  // Phones start compact so the map stays clear; wide screens show the corner panel
+  setDetent(isSide() ? 'mid' : 'peek', true);
 }
 function chip(dev, live, canceled) {
   if (canceled) return '<span class="chip cancel">Canceled</span>';
