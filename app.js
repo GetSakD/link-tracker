@@ -524,7 +524,7 @@ function trIcon(kind) {
   if (kind === 'nogps') c.setLineDash([3, 2.5]);
   c.beginPath(); c.arc(cx, cx, rr - 1.25, 0, Math.PI * 2); c.stroke(); c.setLineDash([]);
   c.fillStyle = kind === 'nogps' ? (dark ? '#EBEBF5' : '#3C3C43') : '#FFFFFF';
-  c.font = '700 ' + (you ? 14 : 11) + 'px -apple-system, system-ui, sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.font = '700 ' + (you ? 15 : 12) + 'px ui-rounded, "SF Pro Rounded", -apple-system, system-ui, sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle';
   c.fillText('2', cx, cx + 0.5);
   return { width: cv.width, height: cv.height, data: c.getImageData(0, 0, cv.width, cv.height).data };
 }
@@ -723,11 +723,13 @@ function chip(dev, live, canceled) {
   if (canceled) return '<span class="chip cancel">Canceled</span>';
   if (!live) return '<span class="chip sched">Scheduled</span>';
   var m = Math.round(dev / 60);
-  if (m === 0) return '<span class="chip ok"><i></i>On time</span>';
-  if (m > 0) return '<span class="chip late"><i></i>' + m + ' min late</span>';
-  return '<span class="chip early"><i></i>' + (-m) + ' min early</span>';
+  if (m === 0) return '<span class="chip ok">' + RT + 'On time</span>';
+  if (m > 0) return '<span class="chip late">' + RT + m + ' min late</span>';
+  return '<span class="chip early">' + RT + (-m) + ' min early</span>';
 }
-function cdHTML(t) { var m = minsText(t); return '<span data-cd="' + t + '">' + m.n + (m.u ? '<small>' + m.u + '</small>' : '') + '</span>'; }
+function cdHTML(t) { var m = minsText(t); return '<span data-cd="' + t + '" data-v="' + m.n + m.u + '"><span>' + m.n + '</span>' + (m.u ? '<small>' + m.u + '</small>' : '') + '</span>'; }
+// "real-time" signal icon (the waves Transit and Apple Maps use for live arrivals)
+var RT = '<svg class="rt" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 10a8 8 0 0 1 8-8"/><path d="M2 10a4 4 0 0 1 4-4"/></svg>';
 function minsText(t) {
   var m = Math.round((t - now()) / 60000);
   if (m <= 0) return { n: 'Now', u: '' };
@@ -822,8 +824,19 @@ function renderDetail(v) {
   if (!tt) fetchTrip(v.tripId).then(renderSheet, function () {});
 }
 function tickTexts() {
-  document.querySelectorAll('[data-cd]').forEach(function (el) { var m = minsText(Number(el.getAttribute('data-cd'))); el.innerHTML = m.n + (m.u ? '<small>' + m.u + '</small>' : ''); });
-  document.querySelectorAll('[data-cdbig]').forEach(function (el) { var m = minsText(Number(el.getAttribute('data-cdbig'))); el.innerHTML = '<b>' + m.n + '</b>' + (m.u ? '<small>' + m.u + '</small>' : ''); });
+  // countdowns roll to the new number when the minute changes (like a departure board)
+  document.querySelectorAll('[data-cd]').forEach(function (el) {
+    var m = minsText(Number(el.getAttribute('data-cd'))), key = m.n + m.u;
+    if (el.dataset.v === key) return;
+    var roll = el.dataset.v !== undefined; el.dataset.v = key;
+    el.innerHTML = '<span' + (roll ? ' class="tick"' : '') + '>' + m.n + '</span>' + (m.u ? '<small>' + m.u + '</small>' : '');
+  });
+  document.querySelectorAll('[data-cdbig]').forEach(function (el) {
+    var m = minsText(Number(el.getAttribute('data-cdbig'))), key = m.n + m.u;
+    if (el.dataset.v === key) return;
+    var roll = el.dataset.v !== undefined; el.dataset.v = key;
+    el.innerHTML = '<b' + (roll ? ' class="tick"' : '') + '>' + m.n + '</b>' + (m.u ? '<small>' + m.u + '</small>' : '');
+  });
   document.querySelectorAll('[data-ago]').forEach(function (el) { var s = Math.max(0, Math.round((now() - Number(el.getAttribute('data-ago'))) / 1000)); el.textContent = s < 60 ? s + 's ago' : Math.round(s / 60) + ' min ago'; });
   updateTag(); updateStatus();
 }
