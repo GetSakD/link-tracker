@@ -392,17 +392,22 @@ function initMap() {
   map = new maplibregl.Map({
     container: 'map', style: styleUrl(), attributionControl: { compact: true },
     bounds: b || [[-122.33, 47.6], [-122.1, 47.83]], fitBoundsOptions: { padding: 40 },
-    dragRotate: false, pitchWithRotate: false, touchPitch: false, maxZoom: 17.5, minZoom: 8, fadeDuration: 120
+    dragRotate: false, pitchWithRotate: false, touchPitch: false, maxZoom: 17.5, minZoom: 8, fadeDuration: 120,
+    pixelRatio: Math.min(window.devicePixelRatio || 1, 2), renderWorldCopies: false, antialias: false
   });
   map.touchZoomRotate.disableRotation();
   map.once('load', function () { var at = document.querySelector('.maplibregl-ctrl-attrib'); if (at) at.classList.remove('maplibregl-compact-show'); });
-  map.on('style.load', function () { tidyStyle(); addOverlays(); addBusLayers(); addPlanLayers(); mapReady = true; applyModeLayers(); applyPadding(); if (S.mode === 'buses') scheduleStopFetch(); });
+  map.on('style.load', function () { tidyStyle(); addOverlays(); addBusLayers(); addPlanLayers(); addTrainLayers(); mapReady = true; trSig = {}; applyModeLayers(); applyPadding(); if (S.mode === 'buses') scheduleStopFetch(); });
   map.on('dragstart', function () { if (S.follow) { S.follow = false; renderSheet(); } });
   map.on('moveend', function () { if (S.mode === 'buses') scheduleStopFetch(); });
   map.on('click', 'lt-bus', function (e) { var f = e.features && e.features[0]; if (f) selectStop(f.properties.id); });
   map.on('mouseenter', 'lt-bus', function () { map.getCanvas().style.cursor = 'pointer'; });
   map.on('mouseleave', 'lt-bus', function () { map.getCanvas().style.cursor = ''; });
+  map.on('click', 'lt-tr', function (e) { var f = e.features && e.features[0]; if (f) { trClick = true; select(f.properties.id); } });
+  map.on('mouseenter', 'lt-tr', function () { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', 'lt-tr', function () { map.getCanvas().style.cursor = ''; });
   map.on('click', function (e) {
+    if (trClick) { trClick = false; return; }
     var tg = e.originalEvent && e.originalEvent.target;
     if (tg && tg.closest && tg.closest('.maplibregl-marker')) return;
     if (S.mode === 'buses') {
@@ -472,6 +477,7 @@ function addOverlays() {
   layer({ id: 'lt-st-label-end', type: 'symbol', source: 'lt-stations', filter: ['==', ['get', 'end'], 1], layout: {
     'text-field': ['get', 'name'], 'text-font': font, 'text-size': 13.5, 'text-anchor': 'left', 'text-offset': [1, 0], 'text-allow-overlap': true },
     paint: { 'text-color': text, 'text-halo-color': halo, 'text-halo-width': 2 } });
+  raiseTrains();
 }
 function refreshOverlays() {
   if (!map || !mapReady || !S.line) return;
@@ -501,6 +507,79 @@ function fitTrip(animate) {
   applyPadding();
   map.fitBounds([[minX, minY], [maxX, maxY]], { padding: { top: 30, bottom: 30, left: 36, right: 30 }, maxZoom: 14.5, duration: animate ? 900 : 0 });
 }
+/* Trains are drawn on the map's GPU canvas, so they move in the same frame as the map
+   (page-element markers lag a frame behind when you pan or pinch, which feels sticky). */
+var trClick = false, trSig = {}, trCount = -1, trTag = '';
+function roundRect(c, x, y, w, h, r) { c.beginPath(); c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r); c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath(); }
+function trIcon(kind) {
+  var R = 2, you = kind === 'you', S0 = you ? 40 : 30, cv = document.createElement('canvas');
+  cv.width = cv.height = S0 * R; var c = cv.getContext('2d'); c.scale(R, R);
+  var line = cssVar('--line') || '#0A7FC2', blue = cssVar('--blue') || '#0A84FF', dark = isDark();
+  var fill = kind === 'other' ? '#8E8E93' : kind === 'nogps' ? (dark ? '#2C2C2E' : '#FFFFFF') : you ? blue : line;
+  var rr = S0 / 2 - 3, cx = S0 / 2;
+  c.shadowColor = 'rgba(0,0,0,.3)'; c.shadowBlur = 5; c.shadowOffsetY = 1.5;
+  c.beginPath(); c.arc(cx, cx, rr, 0, Math.PI * 2); c.fillStyle = fill; c.fill();
+  c.shadowColor = 'transparent';
+  c.lineWidth = 2.5; c.strokeStyle = kind === 'nogps' ? (dark ? '#AEAEB2' : '#6C6C70') : '#FFFFFF';
+  if (kind === 'nogps') c.setLineDash([3, 2.5]);
+  c.beginPath(); c.arc(cx, cx, rr - 1.25, 0, Math.PI * 2); c.stroke(); c.setLineDash([]);
+  c.fillStyle = kind === 'nogps' ? (dark ? '#EBEBF5' : '#3C3C43') : '#FFFFFF';
+  c.font = '700 ' + (you ? 14 : 11) + 'px -apple-system, system-ui, sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText('2', cx, cx + 0.5);
+  return { width: cv.width, height: cv.height, data: c.getImageData(0, 0, cv.width, cv.height).data };
+}
+function trArrow(kind) {
+  var R = 2, you = kind === 'you', S0 = you ? 52 : 42, cv = document.createElement('canvas');
+  cv.width = cv.height = S0 * R; var c = cv.getContext('2d'); c.scale(R, R);
+  var col = kind === 'other' ? '#8E8E93' : kind === 'nogps' ? '#8E8E93' : you ? (cssVar('--blue') || '#0A84FF') : (cssVar('--line') || '#0A7FC2');
+  c.shadowColor = 'rgba(255,255,255,.9)'; c.shadowBlur = 2;
+  c.beginPath(); c.moveTo(S0 / 2, 0.5); c.lineTo(S0 / 2 + 5, 7.5); c.lineTo(S0 / 2 - 5, 7.5); c.closePath(); c.fillStyle = col; c.fill();
+  return { width: cv.width, height: cv.height, data: c.getImageData(0, 0, cv.width, cv.height).data };
+}
+var trTagDrawn = '';
+function setTagImage(text) {
+  // drawn in a canvas (no map fonts needed), redrawn only when the minutes change
+  if (!map || text === trTagDrawn) return; trTagDrawn = text;
+  var R = 2, cv = document.createElement('canvas'), c = cv.getContext('2d'), font = '600 12px -apple-system, system-ui, sans-serif';
+  c.font = font; var W = Math.ceil(c.measureText(text).width) + 20, H = 31;
+  cv.width = W * R; cv.height = H * R; c = cv.getContext('2d'); c.scale(R, R);
+  c.fillStyle = cssVar('--blue') || '#0A84FF';
+  roundRect(c, 0, 0, W, 25, 9); c.fill();
+  c.beginPath(); c.moveTo(W / 2 - 5, 25); c.lineTo(W / 2 + 5, 25); c.lineTo(W / 2, 30); c.closePath(); c.fill();
+  c.fillStyle = '#FFFFFF'; c.font = font; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText(text, W / 2, 13);
+  var img = { width: cv.width, height: cv.height, data: c.getImageData(0, 0, cv.width, cv.height).data };
+  if (map.hasImage('tr-tag')) map.removeImage('tr-tag');
+  map.addImage('tr-tag', img, { pixelRatio: R });
+}
+function pillImage() {
+  var R = 2, W = 24, H = 24, r = 9, cv = document.createElement('canvas');
+  cv.width = W * R; cv.height = H * R; var c = cv.getContext('2d'); c.scale(R, R);
+  roundRect(c, 0, 0, W, H, r); c.fillStyle = cssVar('--blue') || '#0A84FF'; c.fill();
+  return { img: { width: cv.width, height: cv.height, data: c.getImageData(0, 0, cv.width, cv.height).data },
+    opt: { pixelRatio: R, stretchX: [[r * R, (W - r) * R]], stretchY: [[r * R, (H - r) * R]], content: [7 * R, 5 * R, (W - 7) * R, (H - 5) * R] } };
+}
+var TR_LAYERS = ['lt-tr-ring', 'lt-tr-sel', 'lt-tr-arr', 'lt-tr', 'lt-tr-tag'];
+function raiseTrains() { if (map) TR_LAYERS.forEach(function (id) { if (map.getLayer(id)) map.moveLayer(id); }); }
+function addTrainLayers() {
+  if (!map) return;
+  ['live', 'other', 'nogps', 'you'].forEach(function (k) {
+    if (map.hasImage('tr-' + k)) map.removeImage('tr-' + k);
+    map.addImage('tr-' + k, trIcon(k), { pixelRatio: 2 });
+    if (map.hasImage('tra-' + k)) map.removeImage('tra-' + k);
+    map.addImage('tra-' + k, trArrow(k), { pixelRatio: 2 });
+  });
+  var p = pillImage(); if (map.hasImage('tr-pill')) map.removeImage('tr-pill'); map.addImage('tr-pill', p.img, p.opt);
+  if (!map.getSource('lt-trains')) map.addSource('lt-trains', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+  var blue = cssVar('--blue') || '#0A84FF';
+  function L(d) { if (!map.getLayer(d.id)) map.addLayer(d); }
+  L({ id: 'lt-tr-ring', type: 'circle', source: 'lt-trains', filter: ['==', ['get', 'you'], 1], paint: { 'circle-radius': 26, 'circle-color': blue, 'circle-opacity': 0.14, 'circle-stroke-color': blue, 'circle-stroke-width': 1.5, 'circle-stroke-opacity': 0.5, 'circle-pitch-alignment': 'map' } });
+  L({ id: 'lt-tr-sel', type: 'circle', source: 'lt-trains', filter: ['==', ['get', 'sel'], 1], paint: { 'circle-radius': 17, 'circle-color': 'rgba(10,132,255,.45)' } });
+  L({ id: 'lt-tr-arr', type: 'symbol', source: 'lt-trains', layout: { 'icon-image': ['concat', 'tra-', ['get', 'k']], 'icon-rotate': ['get', 'brg'], 'icon-rotation-alignment': 'map', 'icon-allow-overlap': true, 'icon-ignore-placement': true, 'symbol-sort-key': ['get', 'z'] } });
+  L({ id: 'lt-tr', type: 'symbol', source: 'lt-trains', layout: { 'icon-image': ['concat', 'tr-', ['get', 'k']], 'icon-allow-overlap': true, 'icon-ignore-placement': true, 'symbol-sort-key': ['get', 'z'], 'symbol-z-order': 'source' } });
+  trTagDrawn = ''; setTagImage(trTag || 'Your train');
+  L({ id: 'lt-tr-tag', type: 'symbol', source: 'lt-trains', filter: ['==', ['get', 'you'], 1], layout: {
+    'icon-image': 'tr-tag', 'icon-anchor': 'bottom', 'icon-offset': [0, -23], 'icon-allow-overlap': true, 'icon-ignore-placement': true } });
+}
 function trainEl(v) {
   var outer = document.createElement('div'), el = document.createElement('div');
   outer.className = 'train-mk';
@@ -514,7 +593,7 @@ function trainEl(v) {
   return outer;
 }
 function removeVehicleUI(v) {
-  if (v.marker) { v.marker.remove(); v.marker = null; }
+  trCount = -1;
   if (v.lv && v.lv.parentNode) v.lv.parentNode.removeChild(v.lv);
 }
 function updateMe() {
@@ -531,39 +610,50 @@ var lastFrameSig = {};
 function frame() {
   var t = now(), y = yourVehicle(), dirUp = tripDir() === 'up';
   var yourId = y ? y.v.tripId : null;
+  var draw = !!(map && mapReady && S.view === 'map' && S.mode === 'trains'), feats = [], dirty = false, kx = 0, ky = 0;
+  if (draw) {
+    // screen pixels per degree at this zoom (512px tiles), so we skip uploads nobody could see
+    var zz = map.getZoom(), lat0 = map.getCenter().lat, ppd = 512 * Math.pow(2, zz) / 360;
+    kx = ppd; ky = ppd / Math.cos(lat0 * Math.PI / 180);
+    trTag = tagText(); if (trTag !== trTagDrawn) setTagImage(trTag);
+  }
   for (var k in S.veh) {
     var v = S.veh[k], p = locateTrain(v, t);
     if (!p) continue;
     v.cur = p;
-    if (map && S.view === 'map' && S.mode === 'trains') {
-      var cls = 'tr' + (k === yourId ? ' you' : '') + (v.predicted ? '' : ' nogps') + (isUp(v.dirId) === dirUp || k === yourId ? '' : ' other') + (S.selected === k ? ' sel' : '');
-      if (!v.marker) { v.marker = new maplibregl.Marker({ element: trainEl(v), anchor: 'center' }).setLngLat([p.lon, p.lat]).addTo(map); lastFrameSig[k] = null; }
-      else v.marker.setLngLat([p.lon, p.lat]);
-      if (v.el.className !== cls) {
-        v.el.className = cls;
-        v.marker.getElement().style.zIndex = k === yourId ? 3 : S.selected === k ? 2 : 1;
-        var tag = v.el.querySelector('.tag');
-        if (k === yourId && !tag) { tag = document.createElement('div'); tag.className = 'tag'; v.el.appendChild(tag); updateTag(); }
-        if (k !== yourId && tag) tag.remove();
-      }
-      var arr = v.el.firstChild, deg = Math.round(p.brg);
-      if (lastFrameSig[k] !== deg) { arr.style.transform = 'rotate(' + deg + 'deg)'; lastFrameSig[k] = deg; }
+    if (draw) {
+      var kind = k === yourId ? 'you' : !v.predicted ? 'nogps' : isUp(v.dirId) === dirUp ? 'live' : 'other';
+      var deg = Math.round(p.brg / 3) * 3, sig = kind + (S.selected === k ? 's' : '') + deg, o = trSig[k];
+      if (!o || o.sig !== sig || Math.abs(p.lon - o.lon) * kx + Math.abs(p.lat - o.lat) * ky > 0.5) { dirty = true; }
+      feats.push({ k: k, p: p, sig: sig, f: { type: 'Feature', geometry: { type: 'Point', coordinates: [p.lon, p.lat] },
+        properties: { id: k, k: kind, brg: deg, you: k === yourId ? 1 : 0, sel: S.selected === k ? 1 : 0, z: k === yourId ? 3 : S.selected === k ? 2 : kind === 'other' ? 0 : 1, tag: k === yourId ? trTag : '' } } });
+    }
+  }
+  if (draw && (dirty || feats.length !== trCount)) {
+    var src = map.getSource('lt-trains');
+    if (src) {
+      feats.sort(function (x, y) { return x.f.properties.z - y.f.properties.z; });
+      src.setData({ type: 'FeatureCollection', features: feats.map(function (x) { return x.f; }) });
+      trSig = {}; feats.forEach(function (x) { trSig[x.k] = { sig: x.sig, lon: x.p.lon, lat: x.p.lat }; });
+      trCount = feats.length;
     }
   }
   if (map && S.view === 'map' && S.follow) {
     var f = S.selected && S.veh[S.selected] ? S.veh[S.selected] : y && y.v;
-    if (f && f.cur) map.jumpTo({ center: [f.cur.lon, f.cur.lat] });
+    if (f && f.cur) {
+      var c0 = map.getCenter(), pz = 512 * Math.pow(2, map.getZoom()) / 360;
+      if (Math.abs(c0.lng - f.cur.lon) * pz + Math.abs(c0.lat - f.cur.lat) * pz > 0.5) map.jumpTo({ center: [f.cur.lon, f.cur.lat] });
+    }
   }
   if (S.view === 'line') lineFrame(t, yourId);
   requestAnimationFrame(frame);
 }
-function updateTag() {
-  var y = yourVehicle(), n = nextTrain();
-  if (!y || !n || !y.v.el) return;
-  var tag = y.v.el.querySelector('.tag'); if (!tag) return;
+function tagText() {
+  var n = nextTrain(); if (!n) return 'Your train';
   var m = Math.round((n.t - now()) / 60000);
-  tag.textContent = 'Your train · ' + (m <= 0 ? 'now' : m + ' min');
+  return 'Your train · ' + (m <= 0 ? 'now' : m + ' min');
 }
+function updateTag() { /* the tag is drawn on the map; frame() picks up tagText() changes */ }
 
 /* ================= bottom sheet ================= */
 var sheet, sheetBody;
@@ -870,9 +960,11 @@ function addBusLayers() {
 function updateBusLayer() { if (map && mapReady && map.getSource('lt-bus')) map.getSource('lt-bus').setData(busGeo()); }
 function applyModeLayers() {
   if (!map || !mapReady) return;
+  trCount = -1;
   var bus = S.mode === 'buses' && !S.plan;
   ['lt-route-case', 'lt-route', 'lt-trip', 'lt-st', 'lt-st-label', 'lt-st-label-end'].forEach(function (id) { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', bus ? 'none' : 'visible'); });
   ['lt-bus', 'lt-bus-label', 'lt-bus-sel'].forEach(function (id) { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', bus ? 'visible' : 'none'); });
+  ['lt-tr-ring', 'lt-tr-sel', 'lt-tr-arr', 'lt-tr', 'lt-tr-tag'].forEach(function (id) { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', S.mode === 'trains' ? 'visible' : 'none'); });
   if (S.plan && S.mode === 'buses') ['lt-route-case', 'lt-route', 'lt-trip', 'lt-st', 'lt-st-label', 'lt-st-label-end'].forEach(function (id) { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'none'); });
 }
 function setMode(m) {
@@ -1105,6 +1197,7 @@ function addPlanLayers() {
   map.addLayer({ id: 'lt-plan-line', type: 'line', source: 'lt-plan', filter: ['==', ['get', 'walk'], 0], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': ['get', 'color'], 'line-width': 6 } });
   map.addLayer({ id: 'lt-plan-walk', type: 'line', source: 'lt-plan', filter: ['==', ['get', 'walk'], 1], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#0A84FF', 'line-width': 5, 'line-dasharray': [0.1, 1.8] } });
   map.addLayer({ id: 'lt-plan-pts', type: 'circle', source: 'lt-plan-pts', paint: { 'circle-radius': ['case', ['==', ['get', 'end'], 1], 8, 6], 'circle-color': ['case', ['==', ['get', 'end'], 1], '#FF3B30', halo], 'circle-stroke-color': ['case', ['==', ['get', 'end'], 1], halo, ['get', 'color']], 'circle-stroke-width': 3 } });
+  raiseTrains();
 }
 function drawPlan() {
   document.body.classList.toggle('plan-on', !!S.plan);
