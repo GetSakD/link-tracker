@@ -510,7 +510,7 @@ function fitTrip(animate) {
   var minX = Math.min.apply(null, pts.map(function (p) { return p[0]; })), maxX = Math.max.apply(null, pts.map(function (p) { return p[0]; }));
   var minY = Math.min.apply(null, pts.map(function (p) { return p[1]; })), maxY = Math.max.apply(null, pts.map(function (p) { return p[1]; }));
   applyPadding();
-  map.fitBounds([[minX, minY], [maxX, maxY]], { padding: { top: 30, bottom: 30, left: 36, right: 30 }, maxZoom: 14.5, duration: animate ? 900 : 0 });
+  map.fitBounds([[minX, minY], [maxX, maxY]], { padding: { top: 30, bottom: 30, left: 36, right: 30 }, maxZoom: 14.5, pitch: 0, bearing: 0, duration: animate ? 900 : 0 });
 }
 /* Trains are drawn on the map's GPU canvas, so they move in the same frame as the map
    (page-element markers lag a frame behind when you pan or pinch, which feels sticky). */
@@ -985,6 +985,8 @@ function applyModeLayers() {
   ['lt-bus', 'lt-bus-label', 'lt-bus-sel'].forEach(function (id) { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', bus && !S.track ? 'visible' : 'none'); });
   $('#hint').classList.toggle('hidden', !bus || !!S.track || (map.getZoom() >= BUS_ZOOM));
   ['lt-tr-ring', 'lt-tr-sel', 'lt-tr-arr', 'lt-tr', 'lt-tr-tag'].forEach(function (id) { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', S.mode === 'trains' ? 'visible' : 'none'); });
+  // buses on the map only belong to bus mode (or to a planned trip)
+  ['lt-veh-sel', 'lt-veh', 'lt-veh-lbl', 'lt-vroute-case', 'lt-vroute'].forEach(function (id) { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', S.mode === 'buses' || S.plan ? 'visible' : 'none'); });
   if (S.plan && S.mode === 'buses') ['lt-route-case', 'lt-route', 'lt-trip', 'lt-st', 'lt-st-label', 'lt-st-label-end'].forEach(function (id) { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'none'); });
 }
 function setMode(m) {
@@ -994,7 +996,7 @@ function setMode(m) {
   document.querySelectorAll('.modeseg button').forEach(function (b) { b.setAttribute('aria-selected', String(b.getAttribute('data-mode') === m)); });
   if (m === 'buses' && S.view === 'line') setView('map');
   S.selected = null; S.follow = false;
-  if (m !== 'buses' && S.track) stopTrack(true);
+  if (m !== 'buses') { if (S.track) stopTrack(true); S.busSel = null; S.busArr = null; if (typeof updateBusLayer === 'function') updateBusLayer(); flatCam(); }
   applyModeLayers();
   if (m === 'buses') {
     if (map && map.getZoom() < BUS_ZOOM) map.easeTo({ center: S.me ? [S.me.lon, S.me.lat] : map.getCenter(), zoom: 15.5, duration: 700 });
@@ -1114,7 +1116,7 @@ function addVehLayers() {
   if (!map.getLayer('lt-veh-lbl')) map.addLayer({ id: 'lt-veh-lbl', type: 'symbol', source: 'lt-veh', minzoom: 12, filter: ['!=', ['get', 'l'], ''], layout: {
     'icon-image': ['get', 'l'], 'icon-anchor': 'bottom', 'icon-offset': [0, -16], 'icon-allow-overlap': true, 'icon-ignore-placement': true, 'symbol-sort-key': ['get', 'sel'] } });
   Object.keys(VEH).forEach(function (k) { VEH[k].img = null; });
-  vehSig = ''; kickVeh();
+  vehSig = null; kickVeh();
 }
 /* Road-following motion (what Waze, Uber and Google do): the bus is snapped onto its route's
    road shape, keeps rolling at its measured speed between GPS fixes (dead reckoning), turns with
@@ -1126,12 +1128,12 @@ async function loadBusShape(id) {
   try { var d = await oba('shape/' + encodeURIComponent(id) + '.json', {}); var pts = decodePolyline(d.entry && d.entry.points); if (pts.length > 1) BUS_SHAPES[id] = mkShape(pts); }
   catch (e) { /* straight-line glide instead */ }
 }
-function roPred(ro, tMs) { return ro.s + ro.spd * clamp((tMs - ro.t) / 1000, 0, 25); }
+function roPred(ro, tMs) { return ro.s + ro.spd * clamp((tMs - ro.t) / 1000, 0, 60); }
 function roadFix(v, it, t) {
   var sh = it.shape; if (!sh) { v.ro = null; return; }
   var pr = project(sh, it); if (pr.d > 90) { v.ro = null; return; }
   var fixT = it.upd || now();
-  if (!v.ro || v.ro.sh !== sh) { v.ro = { sh: sh, s: pr.s, t: fixT, spd: 0, err: 0, et: t }; v.sd = pr.s; return; }
+  if (!v.ro || v.ro.sh !== sh) { v.ro = { sh: sh, s: pr.s, t: fixT, spd: 0, err: 0, et: t }; v.sd = pr.s; v.vel = 0; return; }
   if (fixT <= v.ro.t + 500) return;                       // same GPS fix as before
   var spd = clamp((pr.s - v.ro.s) / ((fixT - v.ro.t) / 1000), 0, 24);
   v.ro.spd = v.ro.spd ? v.ro.spd * 0.35 + spd * 0.65 : spd;
@@ -1154,7 +1156,7 @@ function setVehicles(group, items) {
     roadFix(v, it, t);
   });
   Object.keys(VEH).forEach(function (k) { if (VEH[k].g === group && !seen[k]) delete VEH[k]; });
-  vehSig = ''; kickVeh();
+  vehSig = null; kickVeh();
 }
 function vehPos(v, t) {
   var k = Math.min(1, Math.max(0, (t - v.t0) / v.dur)); k = k * k * (3 - 2 * k);
@@ -1171,9 +1173,14 @@ function vehFrame(t) {
   Object.keys(VEH).forEach(function (k) {
     var v = VEH[k], p;
     if (v.ro) {
-      var ro = v.ro, s = roPred(ro, now()) + ro.err * Math.max(0, 1 - (t - ro.et) / 2500);
-      if (v.sd != null && s < v.sd && v.sd - s < 150) s = v.sd;  // never roll backwards; wait for the real bus
-      s = clamp(s, 0, ro.sh.len); v.sd = s;
+      // the bus has a real speed that changes gradually: it chases where the GPS says it should be,
+      // speeds up or slows down smoothly, and never rolls backwards
+      var ro = v.ro, tgt = clamp(roPred(ro, now()), 0, ro.sh.len);
+      if (v.sd == null || Math.abs(tgt - v.sd) > 400) { v.sd = tgt; v.vel = ro.spd; }
+      var gap = tgt - v.sd, want = gap < -2 ? 0 : clamp(ro.spd + gap / 8, 0, Math.min(28, ro.spd * 1.5 + 4));
+      v.vel = (v.vel || 0) + (want - (v.vel || 0)) * Math.min(1, dt / 1500);
+      v.sd = clamp(v.sd + v.vel * dt / 1000, 0, ro.sh.len);
+      var s = v.sd;
       p = pointAt(ro.sh, s);
       var tb = brgBetween(pointAt(ro.sh, s - 10), pointAt(ro.sh, s + 18));
       var d = ((tb - v.brg) % 360 + 540) % 360 - 180;
@@ -1190,18 +1197,26 @@ function vehFrame(t) {
     feats.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [p.lon, p.lat] }, properties: { id: v.id, g: v.g, b: v.img.b, l: v.img.l, brg: Math.round(v.brg * 10) / 10, sel: v.sel } });
   });
   var fv = S.track && S.track.follow && S.track.sel && VEH['track|' + S.track.sel];
-  if (fv && fv.cur && !map.isEasing()) {
-    var c0 = map.getCenter(), off = (Math.abs(c0.lng - fv.cur.lon) + Math.abs(c0.lat - fv.cur.lat)) * ppd;
-    var bd = ((fv.brg - map.getBearing()) % 360 + 540) % 360 - 180;
-    if (off > 0.4 || Math.abs(bd) > 0.3) map.jumpTo({ center: [fv.cur.lon, fv.cur.lat], bearing: map.getBearing() + bd * Math.min(1, dt / 900) });
+  if (fv && fv.cur) {
+    if (CAM) {
+      var kk = clamp((t - CAM.t0) / CAM.dur, 0, 1), e = 1 - Math.pow(1 - kk, 3);
+      var db = ((fv.brg - CAM.b0) % 360 + 540) % 360 - 180;
+      map.jumpTo({ center: [CAM.c0.lng + (fv.cur.lon - CAM.c0.lng) * e, CAM.c0.lat + (fv.cur.lat - CAM.c0.lat) * e],
+        zoom: CAM.z0 + (FOLLOW_Z - CAM.z0) * e, pitch: CAM.p0 + (FOLLOW_P - CAM.p0) * e, bearing: CAM.b0 + db * e });
+      if (kk >= 1) CAM = null;
+    } else {
+      var c0 = map.getCenter(), off = (Math.abs(c0.lng - fv.cur.lon) + Math.abs(c0.lat - fv.cur.lat)) * ppd;
+      var bd = ((fv.brg - map.getBearing()) % 360 + 540) % 360 - 180;
+      if (off > 0.3 || Math.abs(bd) > 0.2) map.jumpTo({ center: [fv.cur.lon, fv.cur.lat], bearing: map.getBearing() + bd * Math.min(1, dt / 1100) });
+    }
     busy = true;
-  }
+  } else CAM = null;
   var s = sig.join('|');
   if (s !== vehSig) { vehSig = s; feats.sort(function (x, y) { return x.properties.sel - y.properties.sel; }); map.getSource('lt-veh').setData({ type: 'FeatureCollection', features: feats }); }
   if (busy) kickVeh();
 }
 function onVehClick(id, g) {
-  if (g === 'track' && S.track) { S.track.sel = id; S.track.follow = true; setTrackVehicles(); if (!isSide()) setDetent('peek'); renderSheet(); var v = trackSel(); if (v) setTimeout(function () { followCam(v.pos, true); }, 80); }
+  if (g === 'track' && S.track) { S.track.sel = id; S.track.follow = true; setTrackVehicles(); if (!isSide()) setDetent('peek'); renderSheet(); setTimeout(followStart, 60); }
   else if (g === 'plan' && S.plan) { S.follow = true; updatePlanMarkers(); renderSheet(); }
 }
 
@@ -1211,12 +1226,19 @@ function add3D() {
   if (!src || map.getLayer('lt-3d')) return;
   var first = (st.layers || []).filter(function (l) { return /^lt-/.test(l.id); })[0];
   var dark = isDark();
-  map.addLayer({ id: 'lt-3d', type: 'fill-extrusion', source: src, 'source-layer': 'building', minzoom: 14,
+  map.addLayer({ id: 'lt-3d', type: 'fill-extrusion', source: src, 'source-layer': 'building', minzoom: 15,
     layout: { visibility: map.getPitch() > 8 ? 'visible' : 'none' },
     paint: { 'fill-extrusion-color': dark ? '#2A2D33' : '#E3E5EA', 'fill-extrusion-opacity': 0.85,
       'fill-extrusion-height': ['coalesce', ['get', 'render_height'], 8], 'fill-extrusion-base': ['coalesce', ['get', 'render_min_height'], 0] } }, first ? first.id : undefined);
 }
 function show3D(on) { if (map && map.getLayer('lt-3d')) map.setLayoutProperty('lt-3d', 'visibility', on ? 'visible' : 'none'); }
+var CAM = null, FOLLOW_Z = 17, FOLLOW_P = 50;
+function followStart() {
+  if (!map) return;
+  map.stop();
+  CAM = { t0: performance.now(), dur: 1400, c0: map.getCenter(), z0: map.getZoom(), p0: map.getPitch(), b0: map.getBearing() };
+  show3D(true); kickVeh();
+}
 function followCam(pos, first) {
   if (!map || !pos) return;
   show3D(true);
@@ -1275,7 +1297,7 @@ async function findBus(q) {
     S.track.loading = false;
     setTrackVehicles();
     var sv = trackSel();
-    if (sv) { if (!isSide()) setDetent('peek'); setTimeout(function () { followCam(sv.pos, true); }, 80); } else setTimeout(fitTrack, 80);
+    if (sv) { if (!isSide()) setDetent('peek'); setTimeout(followStart, 60); } else setTimeout(fitTrack, 80);
   } catch (e) {
     if (S.track) { S.track.loading = false; S.track.err = e.message || String(e); }
   }
@@ -1306,7 +1328,7 @@ async function refreshTrack() {
   if (S.track !== T) return;
   setTrackVehicles();
   var s2 = trackSel(), fv = s2 && VEH['track|' + s2.tripId];
-  if (T.follow && s2 && !(fv && fv.ro)) followCam(s2.pos);
+  if (T.follow && s2 && !(fv && fv.ro) && !CAM) followCam(s2.pos);
   renderSheet();
 }
 function setTrackVehicles() {
@@ -1905,7 +1927,7 @@ function wire() {
     else if (act === 'bus-locate') startLocate(true);
     else if (act === 'track-close') stopTrack();
     else if (act === 'track-all') { S.track.sel = null; S.track.follow = false; flatCam(); setTrackVehicles(); fitTrack(); renderSheet(); }
-    else if (act === 'track-follow') { S.track.follow = !S.track.follow; var tv = trackSel(); if (S.track.follow && tv) { if (S.detent === 'full') setDetent('mid'); followCam(tv.pos, true); } else flatCam(); renderSheet(); }
+    else if (act === 'track-follow') { S.track.follow = !S.track.follow; var tv = trackSel(); if (S.track.follow && tv) { if (!isSide()) setDetent('peek'); setTimeout(followStart, 60); } else { CAM = null; flatCam(); } renderSheet(); }
     else if (act === 'plan-close') { S.follow = false; clearPlan(); }
     else if (act === 'plan-follow') { S.follow = !S.follow; if (S.follow && S.detent === 'full') setDetent('mid'); updatePlanMarkers(); renderSheet(); }
     else if (act === 'plan-edit') openDirs();
