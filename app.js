@@ -319,7 +319,15 @@ function reconcile(v, t) {
   var m = modelS(v, t);
   if (m == null) return;
   v.offset = 0;
-  if (v.predicted && v.sObs != null) { var d = v.sObs - m; if (Math.abs(d) > 250) v.offset = clamp(d, -3000, 3000); }
+  var tt = S.trips[v.tripId], sh = vehShape(v);
+  if (v.gps && sh && tt) {
+    // anchor to the real GPS fix: where it was when the fix was taken, then moving on the timetable since
+    var pr = project(sh, v.gps), tot = v.total || tt.st[tt.st.length - 1].s || sh.len;
+    if (pr.d < 150) {
+      var at = v.gpsAt && v.gpsAt < t && t - v.gpsAt < 180000 ? v.gpsAt : t;
+      v.offset = clamp(pr.s * (tot / sh.len) - modelS(v, at), -3000, 3000);
+    }
+  } else if (v.predicted && v.sObs != null) { var d = v.sObs - m; if (Math.abs(d) > 250) v.offset = clamp(d, -3000, 3000); }
   var target = m + v.offset;
   v.corr = v.lastS == null ? 0 : clamp(v.lastS - target, -1500, 1500);
   v.tObs = t;
@@ -330,16 +338,21 @@ function ingest(r) {
     var tr0 = refs.trips[e.tripId];
     if (e.schedule && tr0 && tr0.routeId === CFG.route && !S.trips[e.tripId]) cacheSchedule(e.tripId, e.schedule, e.serviceDate, tr0);
     var st = e.status; if (!st) return;
-    var tid = st.activeTripId || e.tripId, trip = refs.trips[tid];
+    // this entry's status describes another trip (the train is still finishing that one): that trip's own entry shows it
+    if (st.activeTripId && st.activeTripId !== e.tripId) return;
+    // timetable-only trips with no train reporting are ghosts: don't draw them
+    if (!st.predicted && !st.vehicleId) return;
+    var tid = e.tripId, trip = refs.trips[tid];
     if (!trip || trip.routeId !== CFG.route) return;      // the same trains also run 1 Line trips; skip those
     if (seen[tid] || /deadhead/i.test(st.phase || '') || /cancel/i.test(st.status || '')) return;
-    var pos = st.position || st.lastKnownLocation;
+    var gps = st.predicted && st.lastKnownLocation && st.lastKnownLocation.lat ? st.lastKnownLocation : null;  // the train's actual GPS fix
+    var pos = gps || st.position;
     if (!pos) return;
     seen[tid] = 1;
     var v = S.veh[tid] || (S.veh[tid] = { tripId: tid, lastS: null, corr: 0, offset: 0, tObs: 0, el: null, lv: null });
     v.headsign = trip.tripHeadsign || ''; v.dirId = String(trip.directionId); v.shapeId = trip.shapeId;
     v.predicted = !!st.predicted; v.dev = st.scheduleDeviation || 0;
-    v.sObs = st.distanceAlongTrip; v.total = st.totalDistanceAlongTrip; v.pos = { lat: pos.lat, lon: pos.lon };
+    v.sObs = st.distanceAlongTrip; v.total = st.totalDistanceAlongTrip; v.pos = { lat: pos.lat, lon: pos.lon }; v.gps = gps ? { lat: gps.lat, lon: gps.lon } : null;
     v.phase = String(st.phase || ''); v.gpsAt = st.lastLocationUpdateTime || st.lastUpdateTime || 0; v.vehicleId = st.vehicleId || '';
     reconcile(v, t);
   });
@@ -368,17 +381,17 @@ function locateTrain(v, t) {
     v.lastS = s;
     s = s * (sh.len / (tot || sh.len));
   } else {
-    s = project(sh, v.pos).s;
+    s = project(sh, v.gps || v.pos).s;
     v.lastS = null;
   }
   // Trains only roll forward. When new data says the train is running later than we showed,
   // it waits in place until the real train catches up instead of sliding backwards.
-  // Only a big disagreement (wrong track piece, > 800 m) is corrected backwards, smoothly.
+  // A disagreement over 150 m is corrected backwards, smoothly, so a dot never sits far ahead of the train.
   if (v.ds == null || v.dsSh !== sh || Math.abs(s - v.ds) > 5000) { v.ds = s; v.dsSh = sh; v.dsT = t; }
   else {
     var dt = clamp(t - (v.dsT || t), 0, 250), k = 1 - Math.exp(-dt / 1100), gap = s - v.ds;
     if (gap > 0) v.ds += gap * k;
-    else if (gap < -800) v.ds += gap * k * 0.5;
+    else if (gap < -150) v.ds += gap * k * 0.5;
     v.dsT = t;
   }
   return pointAt(sh, v.ds);
@@ -435,7 +448,13 @@ function sortAlerts(list) {
 function arrRows() { var t = now(); return S.arr ? S.arr.list.filter(function (x) { return x.t >= t - 60000; }) : []; }
 function nextTrain() {
   if (!S.arr || S.arr.key !== arrKey()) return null;
-  return S.arr.list.filter(function (x) { return !x.canceled && !x.dup && x.t >= now() - 30000; })[0] || null;
+  var rows = S.arr.list.filter(function (x) { return !x.canceled && !x.dup && x.t >= now() - 30000; });
+  // the big countdown is for a train that is actually reporting; timetable-only trips may never show up
+  return rows.filter(function (x) { return x.live; })[0] || rows[0] || null;
+}
+function unconfirmedBefore(n) {
+  if (!S.arr || !n) return 0;
+  return S.arr.list.filter(function (x) { return !x.canceled && !x.dup && !x.live && x.t >= now() - 30000 && x.t < n.t; }).length;
 }
 function travelOffset(a, b) {
   // seconds from station a to station b in any loaded timetable going the same way
@@ -807,7 +826,7 @@ function initSheet() {
 }
 function chip(dev, live, canceled) {
   if (canceled) return '<span class="chip cancel">Canceled</span>';
-  if (!live) return '<span class="chip sched">Scheduled</span>';
+  if (!live) return '<span class="chip sched" title="No train is reporting for this trip yet">Not confirmed</span>';
   var m = Math.round(dev / 60);
   if (m === 0) return '<span class="chip ok">' + RT + 'On time</span>';
   if (m > 0) return '<span class="chip late">' + RT + m + ' min late</span>';
@@ -875,13 +894,15 @@ function renderSheet() {
     html += '<div class="drag-zone"><div class="hero"><div class="count num' + (n.live ? ' live' : '') + '" data-cdbig="' + n.t + '"></div>' +
       '<div class="hero-info"><div class="hero-title">To ' + esc(S.to) + '</div><div class="hero-sub">' + chip(n.dev, n.live, false) +
       ' <span class="num">' + clock(n.t) + (arrive ? ' → ' + clock(arrive) : '') + '</span></div></div></div>';
-    var wh, est = !(y && y.v.predicted);
+    var wh, est = !(y && y.v.gps);
     if (y && y.v.cur) {
       var w = whereText(y.v);
       if (y.prior) wh = /^at /.test(w) ? 'Your train is ' + w + ', getting ready to leave' : 'Your train is finishing another trip, now ' + w;
-      else wh = (y.v.predicted ? 'Your train is ' : 'Estimated: your train is ') + w + (n.stopsAway > 0 ? ' · ' + n.stopsAway + (n.stopsAway === 1 ? ' stop away' : ' stops away') : '');
+      else wh = (y.v.gps ? 'Your train is ' : 'Estimated: your train is ') + w + (n.stopsAway > 0 ? ' · ' + n.stopsAway + (n.stopsAway === 1 ? ' stop away' : ' stops away') : '');
     }
-    else wh = 'Your train hasn\'t started its trip yet.';
+    else wh = n.live ? 'Your train hasn\'t started its trip yet.' : 'No train is reporting for this trip yet. It may not come, so check back in a few minutes.';
+    var ub = n.live ? unconfirmedBefore(n) : 0;
+    if (ub) wh += '<br><small>' + (ub === 1 ? 'An earlier train is' : ub + ' earlier trains are') + ' on the timetable but not reporting, so it isn\'t counted.</small>';
     html += '<div class="where' + (est ? ' est' : '') + '"><span class="pin"></span><span>' + wh + '</span>' +
       (y && y.v.cur ? '<button class="pill-btn' + (S.follow && !S.selected ? '' : ' tinted') + '" type="button" data-act="follow">' + (S.follow && !S.selected ? 'Following' : 'Follow') + '</button>' : '') + '</div></div>';
   }
@@ -1982,7 +2003,8 @@ function loadSnap() {
   var sn = store.get('snap', null);
   if (!sn || Date.now() - sn.at > 20 * 60000) return;
   S.trips = sn.trips || {};
-  Object.keys(sn.veh || {}).forEach(function (k) { var v = sn.veh[k]; v.lastS = null; v.corr = 0; v.offset = 0; v.tObs = Date.now(); S.veh[k] = v; });
+  // trains saved more than 2 minutes ago are too old to show; timetables and departures are still useful
+  if (Date.now() - sn.at < 2 * 60000) Object.keys(sn.veh || {}).forEach(function (k) { var v = sn.veh[k]; v.lastS = null; v.corr = 0; v.offset = 0; v.tObs = Date.now(); v.ds = null; S.veh[k] = v; });
   S.arr = sn.arr; S.lastOk = sn.lastOk || 0;
 }
 function markOk(before, quiet) {
