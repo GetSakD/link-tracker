@@ -392,13 +392,18 @@ function initMap() {
   map = new maplibregl.Map({
     container: 'map', style: styleUrl(), attributionControl: { compact: true },
     bounds: b || [[-122.33, 47.6], [-122.1, 47.83]], fitBoundsOptions: { padding: 40 },
-    dragRotate: false, pitchWithRotate: false, touchPitch: false, maxZoom: 17.5, minZoom: 8, fadeDuration: 120,
+    dragRotate: true, pitchWithRotate: true, touchPitch: true, maxPitch: 65, maxZoom: 18, minZoom: 8, fadeDuration: 120,
     pixelRatio: Math.min(window.devicePixelRatio || 1, 2), renderWorldCopies: false, antialias: false
   });
-  map.touchZoomRotate.disableRotation();
+  map.on('rotate', updateCompass); map.on('pitch', updateCompass);
+  map.on('pitchend', function () { show3D(map.getPitch() > 8); });
   map.once('load', function () { var at = document.querySelector('.maplibregl-ctrl-attrib'); if (at) at.classList.remove('maplibregl-compact-show'); });
-  map.on('style.load', function () { tidyStyle(); addOverlays(); addBusLayers(); addPlanLayers(); addTrainLayers(); mapReady = true; trSig = {}; applyModeLayers(); applyPadding(); if (S.mode === 'buses') scheduleStopFetch(); });
-  map.on('dragstart', function () { if (S.follow) { S.follow = false; renderSheet(); } });
+  map.on('style.load', function () { tidyStyle(); addOverlays(); addBusLayers(); addPlanLayers(); addTrainLayers(); add3D(); addVehLayers(); mapReady = true; trSig = {}; applyModeLayers(); applyPadding(); if (S.mode === 'buses') scheduleStopFetch(); });
+  map.on('rotatestart', function (e) { if (e.originalEvent && S.track && S.track.follow) { S.track.follow = false; renderSheet(); } });
+  map.on('dragstart', function () { if (S.follow) { S.follow = false; renderSheet(); } if (S.track && S.track.follow) { S.track.follow = false; renderSheet(); } });
+  map.on('click', 'lt-veh', function (e) { var f = e.features && e.features[0]; if (f) { trClick = true; onVehClick(f.properties.id, f.properties.g); } });
+  map.on('mouseenter', 'lt-veh', function () { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', 'lt-veh', function () { map.getCanvas().style.cursor = ''; });
   map.on('moveend', function () { if (S.mode === 'buses') scheduleStopFetch(); });
   map.on('click', 'lt-bus', function (e) { var f = e.features && e.features[0]; if (f) selectStop(f.properties.id); });
   map.on('mouseenter', 'lt-bus', function () { map.getCanvas().style.cursor = 'pointer'; });
@@ -924,7 +929,8 @@ function scheduleStopFetch() {
   stopTimer = setTimeout(async function () {
     if (!map || S.mode !== 'buses') return;
     var z = map.getZoom();
-    $('#hint').classList.toggle('hidden', z >= BUS_ZOOM);
+    $('#hint').classList.toggle('hidden', z >= BUS_ZOOM || !!S.track || !!S.plan);
+    if (S.track) return;
     if (z < BUS_ZOOM) return;
     var b = map.getBounds(), cells = [];
     for (var la = Math.floor(b.getSouth() / CELL); la <= Math.floor(b.getNorth() / CELL); la++)
@@ -976,7 +982,8 @@ function applyModeLayers() {
   trCount = -1;
   var bus = S.mode === 'buses' && !S.plan;
   ['lt-route-case', 'lt-route', 'lt-trip', 'lt-st', 'lt-st-label', 'lt-st-label-end'].forEach(function (id) { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', bus ? 'none' : 'visible'); });
-  ['lt-bus', 'lt-bus-label', 'lt-bus-sel'].forEach(function (id) { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', bus ? 'visible' : 'none'); });
+  ['lt-bus', 'lt-bus-label', 'lt-bus-sel'].forEach(function (id) { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', bus && !S.track ? 'visible' : 'none'); });
+  $('#hint').classList.toggle('hidden', !bus || !!S.track || (map.getZoom() >= BUS_ZOOM));
   ['lt-tr-ring', 'lt-tr-sel', 'lt-tr-arr', 'lt-tr', 'lt-tr-tag'].forEach(function (id) { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', S.mode === 'trains' ? 'visible' : 'none'); });
   if (S.plan && S.mode === 'buses') ['lt-route-case', 'lt-route', 'lt-trip', 'lt-st', 'lt-st-label', 'lt-st-label-end'].forEach(function (id) { if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'none'); });
 }
@@ -987,6 +994,7 @@ function setMode(m) {
   document.querySelectorAll('.modeseg button').forEach(function (b) { b.setAttribute('aria-selected', String(b.getAttribute('data-mode') === m)); });
   if (m === 'buses' && S.view === 'line') setView('map');
   S.selected = null; S.follow = false;
+  if (m !== 'buses' && S.track) stopTrack(true);
   applyModeLayers();
   if (m === 'buses') {
     if (map && map.getZoom() < BUS_ZOOM) map.easeTo({ center: S.me ? [S.me.lon, S.me.lat] : map.getCenter(), zoom: 15.5, duration: 700 });
@@ -1019,7 +1027,7 @@ async function loadStopArrivals() {
     var ts = x.tripStatus || {};
     return { tripId: x.tripId, routeId: x.routeId, headsign: x.tripHeadsign, t: pred || sched, sched: sched, live: live, dev: live ? Math.round((pred - sched) / 1000) : 0,
       stopsAway: typeof x.numberOfStopsAway === 'number' ? x.numberOfStopsAway : null,
-      pos: live && ts.position ? { lat: ts.position.lat, lon: ts.position.lon } : null, canceled: /cancel/i.test(String(ts.status || '')) };
+      pos: live && ts.position ? { lat: ts.position.lat, lon: ts.position.lon } : null, brg: obaBrg(ts), canceled: /cancel/i.test(String(ts.status || '')) };
   }).filter(function (x) { return x.t >= t - 60000; }).sort(function (p, q) { return p.t - q.t; }).slice(0, 30);
   if (id !== S.busSel) return;
   S.busArr = { id: id, at: t, list: list };
@@ -1035,24 +1043,350 @@ function tweenMarker(m, to) {
   }
   requestAnimationFrame(step);
 }
+
+/* ================= vehicles on the GPU: top-down buses that glide and turn ================= */
+function obaBrg(ts) {
+  // OneBusAway orientation: degrees, 0 = east, counter-clockwise. Convert to a compass bearing.
+  var o = ts && ts.orientation;
+  if (typeof o !== 'number' || isNaN(o) || o === 0) return null;
+  return ((90 - o) % 360 + 360) % 360;
+}
+function brgBetween(a, b) {
+  var y = Math.sin((b.lon - a.lon) * Math.PI / 180) * Math.cos(b.lat * Math.PI / 180);
+  var x = Math.cos(a.lat * Math.PI / 180) * Math.sin(b.lat * Math.PI / 180) - Math.sin(a.lat * Math.PI / 180) * Math.cos(b.lat * Math.PI / 180) * Math.cos((b.lon - a.lon) * Math.PI / 180);
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+}
+function shade(hex, k) {
+  var n = parseInt(hex.replace('#', ''), 16), r = n >> 16 & 255, g = n >> 8 & 255, b = n & 255;
+  function f(v) { return Math.max(0, Math.min(255, Math.round(k < 0 ? v * (1 + k) : v + (255 - v) * k))); }
+  return 'rgb(' + f(r) + ',' + f(g) + ',' + f(b) + ')';
+}
+function busTop(color) {
+  // a bus seen from above, nose pointing up: body, roof, windshield, side windows, soft shadow
+  var R = 2, W = 30, H = 58, cv = document.createElement('canvas');
+  cv.width = W * R; cv.height = H * R; var c = cv.getContext('2d'); c.scale(R, R);
+  var x = 6, y = 5, w = 18, h = 46;
+  c.shadowColor = 'rgba(0,0,0,.45)'; c.shadowBlur = 6; c.shadowOffsetY = 2;
+  roundRect(c, x, y, w, h, 5); c.fillStyle = color; c.fill();
+  c.shadowColor = 'transparent';
+  var g = c.createLinearGradient(x, 0, x + w, 0);
+  g.addColorStop(0, shade(color, -0.25)); g.addColorStop(0.5, shade(color, 0.18)); g.addColorStop(1, shade(color, -0.25));
+  roundRect(c, x + 2.5, y + 9, w - 5, h - 14, 3); c.fillStyle = g; c.fill();          // roof
+  c.fillStyle = 'rgba(20,28,38,.88)';
+  roundRect(c, x + 1.6, y + 1.6, w - 3.2, 6.4, 3); c.fill();                          // windshield
+  roundRect(c, x + 3, y + h - 4.4, w - 6, 2.6, 1.3); c.fill();                        // rear window
+  c.fillStyle = 'rgba(255,255,255,.55)';
+  for (var i = 0; i < 4; i++) roundRect(c, x + 5.5, y + 13 + i * 8, w - 11, 3, 1.5), c.fill(); // roof vents
+  c.lineWidth = 1.6; c.strokeStyle = '#FFFFFF'; roundRect(c, x, y, w, h, 5); c.stroke();
+  c.fillStyle = '#FFF6C2'; c.beginPath(); c.arc(x + 3.5, y + 1.2, 1.2, 0, 7); c.arc(x + w - 3.5, y + 1.2, 1.2, 0, 7); c.fill(); // headlights
+  return { width: cv.width, height: cv.height, data: c.getImageData(0, 0, cv.width, cv.height).data };
+}
+function busLabel(text, color, fg) {
+  var R = 2, cv = document.createElement('canvas'), c = cv.getContext('2d'), font = '700 12px ui-rounded, "SF Pro Rounded", -apple-system, system-ui, sans-serif';
+  c.font = font; var W = Math.max(26, Math.ceil(c.measureText(text).width) + 14), H = 20;
+  cv.width = (W + 4) * R; cv.height = (H + 4) * R; c = cv.getContext('2d'); c.scale(R, R);
+  c.shadowColor = 'rgba(0,0,0,.3)'; c.shadowBlur = 4; c.shadowOffsetY = 1;
+  roundRect(c, 2, 2, W, H, 7); c.fillStyle = color; c.fill(); c.shadowColor = 'transparent';
+  c.lineWidth = 1.6; c.strokeStyle = '#FFFFFF'; c.stroke();
+  c.fillStyle = fg; c.font = font; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText(text, 2 + W / 2, 2 + H / 2 + 0.5);
+  return { width: cv.width, height: cv.height, data: c.getImageData(0, 0, cv.width, cv.height).data };
+}
+var VEH = {}, vehRun = false, vehSig = '';
+function vehImages(it) {
+  var bk = 'vb-' + it.color, lk = 'vl-' + it.color + '-' + it.text + '-' + it.label;
+  if (!map.hasImage(bk)) map.addImage(bk, busTop(it.color), { pixelRatio: 2 });
+  if (it.label && !map.hasImage(lk)) map.addImage(lk, busLabel(it.label, it.color, it.text), { pixelRatio: 2 });
+  return { b: bk, l: it.label ? lk : '' };
+}
+function addVehLayers() {
+  if (!map.getSource('lt-vroute')) map.addSource('lt-vroute', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+  if (!map.getLayer('lt-vroute')) {
+    map.addLayer({ id: 'lt-vroute-case', type: 'line', source: 'lt-vroute', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': isDark() ? '#000' : '#fff', 'line-width': ['interpolate', ['linear'], ['zoom'], 11, 5, 16, 11], 'line-opacity': 0.7 } });
+    map.addLayer({ id: 'lt-vroute', type: 'line', source: 'lt-vroute', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': ['get', 'c'], 'line-width': ['interpolate', ['linear'], ['zoom'], 11, 2.5, 16, 6], 'line-opacity': 0.85 } });
+  }
+  if (!map.getSource('lt-veh')) map.addSource('lt-veh', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+  if (!map.getLayer('lt-veh-sel')) map.addLayer({ id: 'lt-veh-sel', type: 'circle', source: 'lt-veh', filter: ['==', ['get', 'sel'], 1],
+    paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 14, 17, 34], 'circle-color': '#0A84FF', 'circle-opacity': 0.16, 'circle-stroke-color': '#0A84FF', 'circle-stroke-width': 1.5, 'circle-stroke-opacity': 0.55, 'circle-pitch-alignment': 'map' } });
+  var size = ['interpolate', ['exponential', 1.6], ['zoom'], 11, 0.42, 14, 0.7, 16, 1.05, 18, 1.7];
+  if (!map.getLayer('lt-veh')) map.addLayer({ id: 'lt-veh', type: 'symbol', source: 'lt-veh', layout: {
+    'icon-image': ['get', 'b'], 'icon-rotate': ['get', 'brg'], 'icon-rotation-alignment': 'map', 'icon-pitch-alignment': 'map',
+    'icon-size': size, 'icon-allow-overlap': true, 'icon-ignore-placement': true, 'symbol-sort-key': ['get', 'sel'], 'symbol-z-order': 'source' } });
+  if (!map.getLayer('lt-veh-lbl')) map.addLayer({ id: 'lt-veh-lbl', type: 'symbol', source: 'lt-veh', minzoom: 12, filter: ['!=', ['get', 'l'], ''], layout: {
+    'icon-image': ['get', 'l'], 'icon-anchor': 'bottom', 'icon-offset': [0, -16], 'icon-allow-overlap': true, 'icon-ignore-placement': true, 'symbol-sort-key': ['get', 'sel'] } });
+  Object.keys(VEH).forEach(function (k) { VEH[k].img = null; });
+  vehSig = ''; kickVeh();
+}
+/* Road-following motion (what Waze, Uber and Google do): the bus is snapped onto its route's
+   road shape, keeps rolling at its measured speed between GPS fixes (dead reckoning), turns with
+   the road instead of cutting corners, and new fixes are blended in over 1.5 s instead of jumping. */
+var BUS_SHAPES = {};
+async function loadBusShape(id) {
+  if (!id || BUS_SHAPES[id] !== undefined) return;
+  BUS_SHAPES[id] = null;
+  try { var d = await oba('shape/' + encodeURIComponent(id) + '.json', {}); var pts = decodePolyline(d.entry && d.entry.points); if (pts.length > 1) BUS_SHAPES[id] = mkShape(pts); }
+  catch (e) { /* straight-line glide instead */ }
+}
+function roPred(ro, tMs) { return ro.s + ro.spd * clamp((tMs - ro.t) / 1000, 0, 25); }
+function roadFix(v, it, t) {
+  var sh = it.shape; if (!sh) { v.ro = null; return; }
+  var pr = project(sh, it); if (pr.d > 90) { v.ro = null; return; }
+  var fixT = it.upd || now();
+  if (!v.ro || v.ro.sh !== sh) { v.ro = { sh: sh, s: pr.s, t: fixT, spd: 0, err: 0, et: t }; v.sd = pr.s; return; }
+  if (fixT <= v.ro.t + 500) return;                       // same GPS fix as before
+  var spd = clamp((pr.s - v.ro.s) / ((fixT - v.ro.t) / 1000), 0, 24);
+  v.ro.spd = v.ro.spd ? v.ro.spd * 0.35 + spd * 0.65 : spd;
+  v.ro.s = pr.s; v.ro.t = fixT;
+  v.ro.err = (v.sd != null ? v.sd : pr.s) - roPred(v.ro, now()); v.ro.et = t;
+  if (Math.abs(v.ro.err) > 400) { v.ro.err = 0; v.sd = null; }  // big jump: just go there
+}
+function setVehicles(group, items) {
+  var t = performance.now(), seen = {};
+  items.forEach(function (it) {
+    var id = group + '|' + it.id, v = VEH[id]; seen[id] = 1;
+    if (!v) { v = VEH[id] = { g: group, id: it.id, from: { lat: it.lat, lon: it.lon }, to: { lat: it.lat, lon: it.lon }, t0: t, dur: 1, brg: it.brg != null ? it.brg : 0, b0: it.brg != null ? it.brg : 0, b1: it.brg != null ? it.brg : 0 }; }
+    else {
+      var cur = vehPos(v, t);
+      v.from = cur; v.to = { lat: it.lat, lon: it.lon }; v.t0 = t; v.dur = 2600;
+      var moved = dist(cur, v.to);
+      v.b0 = v.brg; v.b1 = moved > 12 ? brgBetween(cur, v.to) : (it.brg != null ? it.brg : v.brg);
+    }
+    v.it = it; v.img = null; v.sel = it.sel ? 1 : 0;
+    roadFix(v, it, t);
+  });
+  Object.keys(VEH).forEach(function (k) { if (VEH[k].g === group && !seen[k]) delete VEH[k]; });
+  vehSig = ''; kickVeh();
+}
+function vehPos(v, t) {
+  var k = Math.min(1, Math.max(0, (t - v.t0) / v.dur)); k = k * k * (3 - 2 * k);
+  var d = ((v.b1 - v.b0) % 360 + 540) % 360 - 180; v.brg = (v.b0 + d * Math.min(1, k * 1.6) + 360) % 360;
+  return { lat: v.from.lat + (v.to.lat - v.from.lat) * k, lon: v.from.lon + (v.to.lon - v.from.lon) * k };
+}
+function kickVeh() { if (!vehRun) { vehRun = true; requestAnimationFrame(vehFrame); } }
+var vehLastT = 0;
+function vehFrame(t) {
+  vehRun = false;
+  if (!map || !mapReady || !map.getSource('lt-veh')) return;
+  var feats = [], busy = false, sig = [], ppd = 512 * Math.pow(2, map.getZoom()) / 360, dt = vehLastT ? Math.min(100, t - vehLastT) : 16;
+  vehLastT = t;
+  Object.keys(VEH).forEach(function (k) {
+    var v = VEH[k], p;
+    if (v.ro) {
+      var ro = v.ro, s = roPred(ro, now()) + ro.err * Math.max(0, 1 - (t - ro.et) / 2500);
+      if (v.sd != null && s < v.sd && v.sd - s < 150) s = v.sd;  // never roll backwards; wait for the real bus
+      s = clamp(s, 0, ro.sh.len); v.sd = s;
+      p = pointAt(ro.sh, s);
+      var tb = brgBetween(pointAt(ro.sh, s - 10), pointAt(ro.sh, s + 18));
+      var d = ((tb - v.brg) % 360 + 540) % 360 - 180;
+      v.brg = (v.brg + d * Math.min(1, dt / 220) + 360) % 360;   // ease into turns
+      p = { lat: p.lat, lon: p.lon };
+      busy = true;
+    } else {
+      p = vehPos(v, t);
+      if (t < v.t0 + v.dur) busy = true;
+    }
+    if (!v.img) v.img = vehImages(v.it);
+    v.cur = p;
+    sig.push(k + Math.round(p.lon * ppd * 2) + ',' + Math.round(p.lat * ppd * 2) + ',' + Math.round(v.brg / 2) + v.sel);
+    feats.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [p.lon, p.lat] }, properties: { id: v.id, g: v.g, b: v.img.b, l: v.img.l, brg: Math.round(v.brg * 10) / 10, sel: v.sel } });
+  });
+  var fv = S.track && S.track.follow && S.track.sel && VEH['track|' + S.track.sel];
+  if (fv && fv.cur && !map.isEasing()) {
+    var c0 = map.getCenter(), off = (Math.abs(c0.lng - fv.cur.lon) + Math.abs(c0.lat - fv.cur.lat)) * ppd;
+    var bd = ((fv.brg - map.getBearing()) % 360 + 540) % 360 - 180;
+    if (off > 0.4 || Math.abs(bd) > 0.3) map.jumpTo({ center: [fv.cur.lon, fv.cur.lat], bearing: map.getBearing() + bd * Math.min(1, dt / 900) });
+    busy = true;
+  }
+  var s = sig.join('|');
+  if (s !== vehSig) { vehSig = s; feats.sort(function (x, y) { return x.properties.sel - y.properties.sel; }); map.getSource('lt-veh').setData({ type: 'FeatureCollection', features: feats }); }
+  if (busy) kickVeh();
+}
+function onVehClick(id, g) {
+  if (g === 'track' && S.track) { S.track.sel = id; S.track.follow = true; setTrackVehicles(); if (!isSide()) setDetent('peek'); renderSheet(); var v = trackSel(); if (v) setTimeout(function () { followCam(v.pos, true); }, 80); }
+  else if (g === 'plan' && S.plan) { S.follow = true; updatePlanMarkers(); renderSheet(); }
+}
+
+/* ================= 3D: buildings + tilted follow camera (like Google Maps) ================= */
+function add3D() {
+  var st = map.getStyle(), src = st && st.sources && (st.sources.openmaptiles ? 'openmaptiles' : null);
+  if (!src || map.getLayer('lt-3d')) return;
+  var first = (st.layers || []).filter(function (l) { return /^lt-/.test(l.id); })[0];
+  var dark = isDark();
+  map.addLayer({ id: 'lt-3d', type: 'fill-extrusion', source: src, 'source-layer': 'building', minzoom: 14,
+    layout: { visibility: map.getPitch() > 8 ? 'visible' : 'none' },
+    paint: { 'fill-extrusion-color': dark ? '#2A2D33' : '#E3E5EA', 'fill-extrusion-opacity': 0.85,
+      'fill-extrusion-height': ['coalesce', ['get', 'render_height'], 8], 'fill-extrusion-base': ['coalesce', ['get', 'render_min_height'], 0] } }, first ? first.id : undefined);
+}
+function show3D(on) { if (map && map.getLayer('lt-3d')) map.setLayoutProperty('lt-3d', 'visibility', on ? 'visible' : 'none'); }
+function followCam(pos, first) {
+  if (!map || !pos) return;
+  show3D(true);
+  var o = { center: [pos.lon, pos.lat], duration: first ? 1400 : 2600, easing: function (k) { return k * (2 - k); } };
+  if (first) { o.zoom = Math.max(map.getZoom(), 16.2); o.pitch = 58; }
+  map.easeTo(o);
+}
+function flatCam() { if (map && (map.getPitch() > 1 || Math.abs(map.getBearing()) > 1)) map.easeTo({ pitch: 0, bearing: 0, duration: 800 }); }
+function updateCompass() {
+  var b = $('#btnCompass'); if (!b || !map) return;
+  var on = map.getPitch() > 3 || Math.abs(map.getBearing()) > 3;
+  b.classList.toggle('off', !on);
+  b.firstChild.style.transform = 'rotateX(' + Math.round(map.getPitch() * 0.6) + 'deg) rotate(' + (-map.getBearing()) + 'deg)';
+}
+
+/* ================= find a bus by route or bus number, then follow it ================= */
+function trackSel() { return S.track && S.track.sel ? S.track.vehicles.filter(function (v) { return v.tripId === S.track.sel; })[0] : null; }
+function vehFromStatus(tripId, st, refs) {
+  if (!st || !st.position || !st.predicted) return null;
+  var tr = (refs && refs.trips[tripId]) || (refs && refs.trips[st.activeTripId]) || {};
+  return { tripId: st.activeTripId || tripId, vehicleId: st.vehicleId || '', routeId: tr.routeId || '', headsign: tr.tripHeadsign || '', shapeId: tr.shapeId || '',
+    pos: { lat: st.position.lat, lon: st.position.lon }, brg: obaBrg(st), dev: Math.round((st.scheduleDeviation || 0)),
+    next: st.nextStop || '', near: st.closestStop || '', upd: st.lastLocationUpdateTime || st.lastUpdateTime || 0, phase: st.phase || '' };
+}
+function busNo(vid) { return String(vid || '').replace(/^\d+_/, ''); }
+async function findBus(q) {
+  q = String(q || '').trim(); if (!q) return;
+  var c = S.me || (map ? { lat: map.getCenter().lat, lon: map.getCenter().lng } : { lat: 47.61, lon: -122.2 });
+  S.track = { q: q, loading: true, routes: [], vehicles: [], sel: null, follow: false, err: null };
+  S.busSel = null; S.busArr = null; updateBusLayer(); updateBusMarkers(); applyModeLayers();
+  if (S.detent === 'peek') setDetent('mid');
+  renderSheet();
+  try {
+    if (/^\d{4,5}$/.test(q)) {
+      // a bus number painted on the bus: try Metro, Sound Transit, Community Transit, Pierce Transit
+      var ags = ['1', '40', '29', '3', '19'];
+      for (var i = 0; i < ags.length && !S.track.vehicles.length; i++) {
+        try {
+          var d = await oba('trip-for-vehicle/' + ags[i] + '_' + q, { includeStatus: true, includeSchedule: false });
+          var rf = indexRefs(d.references), e = d.entry || {}, v = vehFromStatus(e.tripId, e.status, rf);
+          if (v) { S.track.vehicles = [v]; S.track.sel = v.tripId; S.track.follow = true; S.track.vid = v.vehicleId; S.track.routes = [v.routeId]; }
+        } catch (err) { if (!err.notFound) throw err; }
+      }
+    }
+    if (!S.track.vehicles.length) {
+      var want = q.toLowerCase().replace(/^route\s*/, ''), ids = Object.keys(S.busRoutes).filter(function (id) { return String(routeName(S.busRoutes[id])).toLowerCase() === want; });
+      if (!ids.length) {
+        var rd = await oba('routes-for-location', { lat: c.lat.toFixed(5), lon: c.lon.toFixed(5), radius: 25000, query: want });
+        (rd.list || []).forEach(function (r) { S.busRoutes[r.id] = r; if (String(routeName(r)).toLowerCase() === want) ids.push(r.id); });
+      }
+      ids = ids.filter(function (id) { return id !== '40_2LINE' && id !== '40_100479'; }).slice(0, 3);
+      if (!ids.length) throw new Error('No route "' + q + '" found near you.');
+      S.track.routes = ids;
+      await loadTrackRoutes();
+    }
+    S.track.loading = false;
+    setTrackVehicles();
+    var sv = trackSel();
+    if (sv) { if (!isSide()) setDetent('peek'); setTimeout(function () { followCam(sv.pos, true); }, 80); } else setTimeout(fitTrack, 80);
+  } catch (e) {
+    if (S.track) { S.track.loading = false; S.track.err = e.message || String(e); }
+  }
+  renderSheet();
+}
+async function loadTrackRoutes() {
+  var all = [];
+  for (var i = 0; i < S.track.routes.length; i++) {
+    var d = await oba('trips-for-route/' + S.track.routes[i], { includeStatus: true, includeSchedule: false });
+    var rf = indexRefs(d.references);
+    (d.list || []).forEach(function (x) { var v = vehFromStatus(x.tripId, x.status, rf); if (v && !all.some(function (o) { return o.vehicleId && o.vehicleId === v.vehicleId; })) all.push(v); });
+  }
+  var me = S.me;
+  if (me) all.sort(function (p, q) { return dist(p.pos, me) - dist(q.pos, me); });
+  S.track.vehicles = all;
+}
+async function refreshTrack() {
+  var T = S.track; if (!T || T.loading) return;
+  var sv = trackSel();
+  if (sv && sv.vehicleId) {
+    var d = await oba('trip-for-vehicle/' + sv.vehicleId, { includeStatus: true, includeSchedule: false });
+    var rf = indexRefs(d.references), e = d.entry || {}, v = vehFromStatus(e.tripId, e.status, rf);
+    if (!S.track || S.track !== T) return;
+    if (v) { T.vehicles = T.vehicles.map(function (o) { return o.vehicleId === v.vehicleId ? v : o; }); T.sel = v.tripId; }
+  } else if (T.routes.length) {
+    await loadTrackRoutes();
+  }
+  if (S.track !== T) return;
+  setTrackVehicles();
+  var s2 = trackSel(), fv = s2 && VEH['track|' + s2.tripId];
+  if (T.follow && s2 && !(fv && fv.ro)) followCam(s2.pos);
+  renderSheet();
+}
+function setTrackVehicles() {
+  var T = S.track; if (!T) { setVehicles('track', []); if (map && map.getSource('lt-vroute')) map.getSource('lt-vroute').setData({ type: 'FeatureCollection', features: [] }); return; }
+  var list = T.sel ? T.vehicles.filter(function (v) { return v.tripId === T.sel; }) : T.vehicles;
+  var need = {};
+  list.slice(0, 40).forEach(function (v) { if (v.shapeId && BUS_SHAPES[v.shapeId] === undefined) need[v.shapeId] = 1; });
+  Object.keys(need).slice(0, 4).forEach(function (id) { loadBusShape(id).then(function () { if (S.track === T) setTrackVehicles(); }); });
+  var seenSh = {}, lines = [];
+  list.slice(0, 40).forEach(function (v) {
+    var sh = BUS_SHAPES[v.shapeId]; if (!sh || !sh.len || seenSh[v.shapeId]) return; seenSh[v.shapeId] = 1;
+    lines.push({ type: 'Feature', properties: { c: routeColor(S.busRoutes[v.routeId]) }, geometry: { type: 'LineString', coordinates: sh.pts.map(function (p) { return [p[1], p[0]]; }) } });
+  });
+  if (map && map.getSource('lt-vroute')) map.getSource('lt-vroute').setData({ type: 'FeatureCollection', features: lines });
+  setVehicles('track', list.slice(0, 40).map(function (v) {
+    var r = S.busRoutes[v.routeId], sh = BUS_SHAPES[v.shapeId];
+    return { id: v.tripId, lat: v.pos.lat, lon: v.pos.lon, brg: v.brg, color: routeColor(r), text: routeText(r), label: routeName(r), sel: v.tripId === T.sel,
+      shape: sh && sh.len ? sh : null, upd: v.upd };
+  }));
+}
+function fitTrack() {
+  var T = S.track; if (!map || !T || !T.vehicles.length) return;
+  var pts = T.vehicles.map(function (v) { return v.pos; }); if (S.me) pts.push(S.me);
+  var lo = [Math.min.apply(null, pts.map(function (p) { return p.lon; })), Math.min.apply(null, pts.map(function (p) { return p.lat; }))];
+  var hi = [Math.max.apply(null, pts.map(function (p) { return p.lon; })), Math.max.apply(null, pts.map(function (p) { return p.lat; }))];
+  applyPadding();
+  map.fitBounds([lo, hi], { padding: 40, maxZoom: 15, pitch: 0, bearing: 0, duration: 900 });
+}
+function stopTrack(quiet) {
+  S.track = null; setTrackVehicles(); flatCam(); applyModeLayers();
+  if (!quiet) { updateBusMarkers(); renderSheet(); }
+}
+function trackHTML() {
+  var T = S.track, html = '', r0 = S.busRoutes[T.routes[0]];
+  var title = T.vid ? 'Bus ' + busNo(T.vid) : (r0 ? 'Route ' + routeName(r0) : 'Find "' + T.q + '"');
+  html += '<div class="drag-zone"><div class="d-head">' + (r0 ? rbHTML(r0) : '<div class="stop-ico" style="width:42px;height:42px;border-radius:12px">' + BUSSVG + '</div>') +
+    '<div class="d-title"><h2>' + esc(title) + '</h2><div>' + (T.loading ? 'Finding it live…' : T.err ? '' : T.vehicles.length + (T.vehicles.length === 1 ? ' bus' : ' buses') + ' on the road now') + '</div></div>' +
+    '<button class="close" type="button" data-act="track-close" aria-label="Stop tracking"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button></div></div>';
+  if (T.loading) return html + '<div class="skel" style="height:64px;margin-top:16px"></div><div class="skel" style="height:64px;margin-top:8px"></div>';
+  if (T.err) return html + '<div class="empty">' + esc(T.err) + ' Try a route like 545 or the 4-digit number on the bus.</div>';
+  if (!T.vehicles.length) return html + '<div class="empty">No live buses on this route right now. It may not be running at this hour.</div>';
+  var sv = trackSel();
+  if (sv) {
+    var nx = (S.stopInfo[sv.next] || {}).name, nr = (S.stopInfo[sv.near] || {}).name;
+    html += '<div class="ride"><div class="ride-top"><div class="ride-h">To ' + esc(sv.headsign || '…') + '</div>' +
+      '<button class="pill-btn' + (T.follow ? '' : ' tinted') + '" type="button" data-act="track-follow">' + (T.follow ? 'Following' : 'Follow') + '</button></div>' +
+      '<div class="ride-l">' + chip(Math.round(sv.dev / 60) * 60, true, false) + (sv.vehicleId ? ' <span class="muted">Bus ' + esc(busNo(sv.vehicleId)) + '</span>' : '') +
+      (nr ? '<br>Near <b>' + esc(nr) + '</b>' : '') + (nx && nx !== nr ? '<br>Next stop <b>' + esc(nx) + '</b>' : '') +
+      (S.me ? '<br>' + miles(dist(sv.pos, S.me)) + ' from you' : '') +
+      (sv.upd ? '<br><span class="muted">GPS updated <span data-ago="' + sv.upd + '"></span></span>' : '') + '</div></div>';
+    if (!T.vid && T.vehicles.length > 1) html += '<div class="group" style="margin-top:10px"><button class="cell" type="button" data-act="track-all"><span class="v" style="color:var(--blue)">Show all ' + T.vehicles.length + ' buses</span></button></div>';
+    html += '<p class="foot">Tilt the map with two fingers to see it in 3D. Live GPS from the transit agency, updated every ' + S.refreshSec + ' s.</p>';
+    return html;
+  }
+  html += '<div class="sec">Tap a bus to follow it</div><div class="group">';
+  T.vehicles.slice(0, 30).forEach(function (v) {
+    var r = S.busRoutes[v.routeId], nr = (S.stopInfo[v.near] || S.stopInfo[v.next] || {}).name;
+    html += '<button class="bdep" type="button" data-veh="' + esc(v.tripId) + '" style="width:100%;text-align:left">' + rbHTML(r) +
+      '<div class="m"><div class="h">To ' + esc(v.headsign || '…') + '</div><div class="s">' + chip(Math.round(v.dev / 60) * 60, true, false) + (nr ? ' near ' + esc(nr) : '') + '</div></div>' +
+      '<div class="mins num" style="font-size:15px">' + (S.me ? miles(dist(v.pos, S.me)) : '') + '<div>Bus ' + esc(busNo(v.vehicleId)) + '</div></div></button>';
+  });
+  return html + '</div>';
+}
+
 function updateBusMarkers() {
   if (!map) return;
-  var keep = {}, shown = 0, list = (S.mode === 'buses' && S.busArr && S.busArr.id === S.busSel) ? S.busArr.list : [];
+  var items = [], keep = {}, list = (S.mode === 'buses' && !S.track && S.busArr && S.busArr.id === S.busSel) ? S.busArr.list : [];
   list.forEach(function (x) {
-    if (!x.pos || x.canceled || shown >= 10 || keep[x.tripId]) return;
+    if (!x.pos || x.canceled || items.length >= 10 || keep[x.tripId]) return;
     if (S.busFilter !== 'all' && x.routeId !== S.busFilter) return;
-    shown++; keep[x.tripId] = 1;
-    var r = S.busRoutes[x.routeId], m = busMarkers[x.tripId];
-    if (!m) {
-      var el = document.createElement('div');
-      el.className = 'busmk'; el.style.background = routeColor(r); el.style.color = routeText(r); el.textContent = routeName(r);
-      el.setAttribute('aria-label', 'Route ' + routeName(r) + ' bus to ' + (x.headsign || ''));
-      m = busMarkers[x.tripId] = new maplibregl.Marker({ element: el, anchor: 'center' }).setLngLat([x.pos.lon, x.pos.lat]).addTo(map);
-    } else tweenMarker(m, x.pos);
+    keep[x.tripId] = 1;
+    var r = S.busRoutes[x.routeId];
+    items.push({ id: x.tripId, lat: x.pos.lat, lon: x.pos.lon, brg: x.brg, color: routeColor(r), text: routeText(r), label: routeName(r) });
   });
-  Object.keys(busMarkers).forEach(function (k) { if (!keep[k]) { busMarkers[k].remove(); delete busMarkers[k]; } });
+  setVehicles('stop', items);
 }
 function renderBusSheet() {
+  var fi = document.activeElement;
+  if (fi && fi.id === 'findInput') return;   // don't wipe what you're typing
+  if (S.track) { sheetBody.innerHTML = trackHTML(); tickTexts(); return; }
   var html = '';
   var s = S.busSel && S.busStops[S.busSel];
   if (s) {
@@ -1081,7 +1415,9 @@ function renderBusSheet() {
     }
     html += '<p class="foot">Buses heading to this stop are shown on the map. Live data from King County Metro, Community Transit and Sound Transit.</p>';
   } else {
-    html += '<div class="drag-zone"><div class="hero-title" style="font-size:20px;font-weight:700;white-space:normal">Bus stops</div><div class="hero-sub">Tap any bus stop on the map to see its next buses.</div></div>' +
+    html += '<div class="drag-zone"><div class="hero-title" style="font-size:20px;font-weight:700;white-space:normal">Buses</div><div class="hero-sub">Find any bus by route or bus number, or tap a stop on the map.</div></div>' +
+      '<form class="find" id="findForm" autocomplete="off"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>' +
+      '<input id="findInput" type="search" enterkeyhint="search" placeholder="Find a bus: 545, 271, or bus #" aria-label="Find a bus by route or bus number"></form>' +
       '<div class="group" style="margin-top:12px"><button class="cell" type="button" data-act="dirs"><span class="loc-ico" style="background:var(--fill);color:var(--label2)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg></span><span class="v" style="color:var(--label2)">Where to?</span></button></div>';
     if (S.me) {
       var near = Object.keys(S.busStops).map(function (id) { var q = S.busStops[id]; return { s: q, d: dist(q, S.me) }; }).sort(function (p, q) { return p.d - q.d; }).slice(0, 8);
@@ -1263,7 +1599,7 @@ async function trackPlanVehicles() {
         var sch = pick.scheduledDepartureTime || pick.scheduledArrivalTime, pr = live ? (pick.predictedDepartureTime || pick.predictedArrivalTime) : 0;
         var ts = pick.tripStatus || {};
         l._live = { live: live, t: pr || sch, dev: live ? Math.round((pr - sch) / 1000) : 0, stopsAway: typeof pick.numberOfStopsAway === 'number' ? pick.numberOfStopsAway : null,
-          pos: ts.position && (live || ts.predicted) ? { lat: ts.position.lat, lon: ts.position.lon } : null, canceled: /cancel/i.test(String(ts.status || '')), routeId: pick.routeId,
+          pos: ts.position && (live || ts.predicted) ? { lat: ts.position.lat, lon: ts.position.lon } : null, brg: obaBrg(ts), canceled: /cancel/i.test(String(ts.status || '')), routeId: pick.routeId,
           near: ((S.stopInfo[ts.closestStop] || S.stopInfo[ts.nextStop] || {}).name) || '' };
       } else l._live = null;
     } catch (e) { /* keep the timetable version of this step */ }
@@ -1273,23 +1609,16 @@ async function trackPlanVehicles() {
   if (S.plan === P) renderSheet();
 }
 function updatePlanMarkers() {
-  var P = S.plan, keep = {};
+  var P = S.plan, items = [];
   var it = P && P.its && P.its[P.sel];
   if (map && it) it.legs.forEach(function (l, i) {
     if (l.mode === 'WALK' || !l._live || !l._live.pos || l._live.canceled || Date.parse(l.endTime) < now()) return;
-    var k = P.sel + ':' + i; keep[k] = 1;
-    var m = planMarkers[k];
-    if (!m) {
-      var el = document.createElement('div');
-      el.className = 'busmk'; el.style.background = legColor(l); el.style.color = legText(l); el.textContent = l.routeShortName || l.displayName || '';
-      el.setAttribute('aria-label', 'Your ' + (l.routeShortName || '') + ' right now');
-      m = planMarkers[k] = new maplibregl.Marker({ element: el, anchor: 'center' }).setLngLat([l._live.pos.lon, l._live.pos.lat]).addTo(map);
-    } else tweenMarker(m, l._live.pos);
+    items.push({ id: P.sel + ':' + i, lat: l._live.pos.lat, lon: l._live.pos.lon, brg: l._live.brg, color: legColor(l), text: legText(l), label: l.routeShortName || l.displayName || '', sel: true });
   });
-  Object.keys(planMarkers).forEach(function (k) { if (!keep[k]) { planMarkers[k].remove(); delete planMarkers[k]; } });
+  setVehicles('plan', items);
   updateWaitMarker();
   var fr = firstRide();
-  if (S.follow && fr && fr._live && fr._live.pos && map) map.easeTo({ center: [fr._live.pos.lon, fr._live.pos.lat], zoom: Math.max(map.getZoom(), 14), duration: 900 });
+  if (S.follow && fr && fr._live && fr._live.pos && map) followCam(fr._live.pos);
 }
 
 var waitMarker = null;
@@ -1509,7 +1838,8 @@ async function refresh(manual) {
       return;
     }
     if (S.mode === 'buses') {
-      if (S.busSel) await loadStopArrivals();
+      if (S.track) await refreshTrack();
+      else if (S.busSel) await loadStopArrivals();
       S.lastOk = now(); S.err = null;
       return;
     }
@@ -1550,9 +1880,14 @@ document.addEventListener('visibilitychange', function () { if (document.visibil
 /* ================= wiring ================= */
 function wire() {
   sheetBody.addEventListener('toggle', function (e) { if (e.target.matches && e.target.matches('details.alert')) S.alertOpen = e.target.open; }, true);
+  sheetBody.addEventListener('submit', function (e) {
+    if (e.target.id !== 'findForm') return;
+    e.preventDefault(); var inp = $('#findInput'), q = inp ? inp.value : ''; if (inp) inp.blur(); findBus(q);
+  });
   sheetBody.addEventListener('click', function (e) {
     var itb = e.target.closest('[data-it]'); if (itb && S.plan) { S.plan.sel = Number(itb.getAttribute('data-it')); drawPlan(); renderSheet(); updatePlanMarkers(); trackPlanVehicles(); return; }
     var st = e.target.closest('[data-stop]'); if (st) { selectStop(st.getAttribute('data-stop')); return; }
+    var vh = e.target.closest('[data-veh]'); if (vh && S.track) { onVehClick(vh.getAttribute('data-veh'), 'track'); return; }
     var rt = e.target.closest('[data-route]'); if (rt) { S.busFilter = rt.getAttribute('data-route'); renderSheet(); updateBusMarkers(); return; }
     var b = e.target.closest('[data-act]'); if (!b) return;
     var act = b.getAttribute('data-act');
@@ -1568,6 +1903,9 @@ function wire() {
     else if (act === 'close') { S.selected = null; S.follow = false; renderSheet(); }
     else if (act === 'bus-close') { S.busSel = null; S.busArr = null; updateBusLayer(); updateBusMarkers(); renderSheet(); }
     else if (act === 'bus-locate') startLocate(true);
+    else if (act === 'track-close') stopTrack();
+    else if (act === 'track-all') { S.track.sel = null; S.track.follow = false; flatCam(); setTrackVehicles(); fitTrack(); renderSheet(); }
+    else if (act === 'track-follow') { S.track.follow = !S.track.follow; var tv = trackSel(); if (S.track.follow && tv) { if (S.detent === 'full') setDetent('mid'); followCam(tv.pos, true); } else flatCam(); renderSheet(); }
     else if (act === 'plan-close') { S.follow = false; clearPlan(); }
     else if (act === 'plan-follow') { S.follow = !S.follow; if (S.follow && S.detent === 'full') setDetent('mid'); updatePlanMarkers(); renderSheet(); }
     else if (act === 'plan-edit') openDirs();
@@ -1592,6 +1930,7 @@ function wire() {
     var b = e.target.closest('[data-gi]'); if (b) chooseDir(D.results[Number(b.getAttribute('data-gi'))]);
   });
   $('#btnLine').addEventListener('click', function () { setView(S.view === 'line' ? 'map' : 'line'); });
+  $('#btnCompass').addEventListener('click', function () { if (S.track) S.track.follow = false; S.follow = false; flatCam(); show3D(false); renderSheet(); });
   $('#btnLocate').addEventListener('click', function () { if (S.view === 'line') setView('map'); startLocate(true); });
   $('#btnSettings').addEventListener('click', function () {
     $('#keyInput').value = S.key === 'TEST' ? '' : S.key;
