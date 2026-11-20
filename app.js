@@ -55,7 +55,7 @@ function jsonp(url, ms) {
     var name = '__oba' + (++cbN), u = new URL(url.toString()), s = document.createElement('script');
     u.searchParams.set('callback', name);
     var timer = setTimeout(function () { done(); reject(new Error('Request timed out')); }, ms);
-    function done() { clearTimeout(timer); try { delete window[name]; } catch (e) { window[name] = undefined; } if (s.parentNode) s.parentNode.removeChild(s); }
+    function done() { clearTimeout(timer); window[name] = function () {}; if (s.parentNode) s.parentNode.removeChild(s); }  // a late reply lands in a no-op
     window[name] = function (d) { done(); resolve(d); };
     s.onerror = function () { done(); reject(new Error('Network error')); };
     s.src = u.toString(); document.head.appendChild(s);
@@ -73,26 +73,40 @@ function rawGet(u) {
     });
   }, function (e) {
     clearTimeout(t);
-    if (transport === null && e && e.name === 'TypeError') { transport = 'jsonp'; return jsonp(u, 15000); }
+    if (transport === null && e && e.name === 'TypeError') {
+      // one network blip shouldn't switch transports for good: only after two failures in a row
+      netFails++; if (netFails >= 2) transport = 'jsonp';
+      return jsonp(u, 15000);
+    }
     throw e;
   });
 }
+var netFails = 0, obaQueue = Promise.resolve();
+function obaSlot() {
+  // one queue: calls leave at least `gap` ms apart even when many start at once
+  var gap = S.key === 'TEST' ? 650 : 150;
+  var p = obaQueue.then(function () { var w = lastCall + gap - Date.now(); return w > 0 ? sleep(w) : null; }).then(function () { lastCall = Date.now(); });
+  obaQueue = p.catch(function () {});
+  return p;
+}
 async function oba(path, params) {
-  var gap = S.key === 'TEST' ? 650 : 150, wait = lastCall + gap - Date.now();
-  if (wait > 0) await sleep(wait);
-  lastCall = Date.now();
+  // OneBusAway answers in XML unless the path ends in .json
+  var qi = path.indexOf('?'), base = qi >= 0 ? path.slice(0, qi) : path;
+  if (!/\.json$/.test(base)) path = base + '.json' + (qi >= 0 ? path.slice(qi) : '');
   var u = new URL(CFG.base + path);
   u.searchParams.set('key', S.key);
   Object.keys(params || {}).forEach(function (k) { u.searchParams.set(k, params[k]); });
   var lastErr = null;
   for (var attempt = 0; attempt < 3; attempt++) {
     try {
+      await obaSlot();
       var body = await rawGet(u);
+      if (body) netFails = 0;
       if (body && typeof body.currentTime === 'number' && body.currentTime > 1e12) S.offset = body.currentTime - Date.now();
       var code = body && body.code;
-      if (code === 200) { noteStops(body.data && body.data.references); return body.data || {}; }
+      if (code === 200) { S.okCalls = (S.okCalls || 0) + 1; S.keyBad = false; noteStops(body.data && body.data.references); return body.data || {}; }
       if (code === 429) { lastErr = new Error('Sound Transit is busy (rate limit). Retrying…'); await sleep(1500 * (attempt + 1)); continue; }
-      if (code === 401) { var e1 = new Error('The API key was rejected. Check it in Settings.'); e1.fatal = true; throw e1; }
+      if (code === 401) { S.keyBad = true; var e1 = new Error('The API key was rejected. Check it in Settings.'); e1.fatal = true; throw e1; }
       if (code === 404) { var e2 = new Error('Not found: ' + path); e2.fatal = true; e2.notFound = true; throw e2; }
       throw new Error((body && body.text) || ('Error ' + code));
     } catch (e) {
@@ -215,7 +229,9 @@ async function loadLine(force) {
   });
   if (!best.up && !best.down) {
     if (c) { finishLine(c); return r; }
-    throw new Error('The 2 Line isn\'t running right now, so the line can\'t be drawn yet. Try again during service hours.');
+    var Ls = await lineFromStops();          // no trains running: build it from the route's stop list
+    store.set('line', Ls); finishLine(lineFromStore(Ls));
+    return r;
   }
   var stations = [];
   if (best.up) {
@@ -243,11 +259,33 @@ async function loadLine(force) {
   finishLine(L);
   return r;
 }
+function lineFromStore(c) { var o = JSON.parse(JSON.stringify(c)); return o; }
+async function lineFromStops() {
+  var d = await oba('stops-for-route/' + CFG.route + '.json', { includePolylines: 'true', version: '2' });
+  var refs = indexRefs(d.references), groups = (((d.entry || {}).stopGroupings || [])[0] || {}).stopGroups || [];
+  if (groups.length < 1) throw new Error('Couldn\'t load the 2 Line stations. Try again in a minute.');
+  function lastStop(g) { var ids = g.stopIds || []; return refs.stops[ids[ids.length - 1]]; }
+  var up = groups.filter(function (g) { var s = lastStop(g); return s && dist(s, CFG.north) < 900; })[0] || groups[0];
+  var down = groups.filter(function (g) { return g !== up; })[0] || null;
+  var stations = [];
+  (up.stopIds || []).forEach(function (id) { var s = refs.stops[id]; if (s && !stations.some(function (q) { return q.name === s.name; })) stations.push({ name: s.name, lat: s.lat, lon: s.lon, up: id, down: null }); });
+  if (down) (down.stopIds || []).forEach(function (id) {
+    var s = refs.stops[id]; if (!s) return;
+    var i = -1, bd = 450;
+    stations.forEach(function (q, j) { if (q.name === s.name) { i = j; bd = -1; } else if (bd >= 0) { var dd = dist(q, s); if (dd < bd) { bd = dd; i = j; } } });
+    if (i >= 0 && !stations[i].down) stations[i].down = id;
+  });
+  function poly(g) { var pts = []; (g && g.polylines || []).forEach(function (p) { pts = pts.concat(decodePolyline(p.points)); }); return pts; }
+  var pu = poly(up), pd = down ? poly(down) : pu.slice().reverse();
+  return { v: 3, at: Date.now(), stations: stations, shapes: { 'grp-up': { pts: pu }, 'grp-down': { pts: pd } },
+    dirUp: String(up.id != null ? up.id : '1'), dirDown: String(down && down.id != null ? down.id : (up.id === '0' ? '1' : '0')), shapeUp: 'grp-up', shapeDown: 'grp-down' };
+}
 async function ensureShape(id) {
   if (!id || !S.line || S.line.shapes[id] || ensureShape.pending[id]) return;
   ensureShape.pending[id] = 1;
   try { var sh = await oba('shape/' + encodeURIComponent(id) + '.json', {}); S.line.shapes[id] = { pts: decodePolyline(sh.entry && sh.entry.points) }; }
   catch (e) { /* fall back to the main track shape */ }
+  finally { delete ensureShape.pending[id]; }
 }
 ensureShape.pending = {};
 
@@ -352,22 +390,55 @@ async function loadArrivals() {
   }).map(function (x) {
     var live = x.predicted === true && ((x.predictedDepartureTime || 0) > 0 || (x.predictedArrivalTime || 0) > 0);
     var sched = x.scheduledDepartureTime || x.scheduledArrivalTime, pred = live ? (x.predictedDepartureTime || x.predictedArrivalTime) : 0;
-    var ts = x.tripStatus || {};
+    var ts = x.tripStatus || {}, tr = refs.trips[x.tripId] || {};
     return { tripId: x.tripId, t: pred || sched, sched: sched, live: live, dev: live ? Math.round((pred - sched) / 1000) : 0,
+      hs: x.tripHeadsign || tr.tripHeadsign || '', vid: ts.vehicleId || x.vehicleId || '', dup: /DUPLICATED/i.test(String(ts.status || '')),
       stopsAway: typeof x.numberOfStopsAway === 'number' ? x.numberOfStopsAway : null,
       canceled: /cancel/i.test(String(ts.status || '') + ' ' + String(x.status || '')) };
-  }).filter(function (x) { return x.t >= t - 60000; }).sort(function (p, q) { return p.t - q.t; }).slice(0, 8);
+  }).filter(function (x) { return x.t >= t - 60000; }).sort(function (p, q) { return p.t - q.t; });
+  // the feed sometimes lists one train twice (status DUPLICATED): keep the real one
+  list = list.filter(function (x) {
+    if (!x.dup) return true;
+    return !list.some(function (o) { return o !== x && !o.dup && ((x.vid && o.vid === x.vid) || Math.abs(o.t - x.t) < 180000); });
+  }).slice(0, 8);
   S.arr = { key: arrKey(), at: t, list: list };
-  S.alerts = refs.situations.filter(function (s) { return s && s.summary && s.summary.value; });
+  S.alerts = sortAlerts(refs.situations.filter(function (s) { return s && s.summary && s.summary.value; }));
   for (var i = 0; i < Math.min(3, list.length); i++) { try { await fetchTrip(list[i].tripId); } catch (e) { /* keep going */ } }
+  // the rest load quietly after the first paint
+  var rest = list.slice(3).map(function (x) { return x.tripId; }).filter(function (id) { return !S.trips[id]; });
+  if (rest.length) setTimeout(function () { (async function () { for (var j = 0; j < rest.length; j++) { try { await fetchTrip(rest[j]); } catch (e) {} } renderSheet(); })(); }, 400);
 }
+function fixText(s) {
+  s = String(s || '');
+  if (/[ÂÃâ]/.test(s)) { try { s = decodeURIComponent(escape(s)); } catch (e) {
+    s = s.replace(/â€™|â€˜/g, '\'').replace(/â€œ|â€\u009d|â€/g, '"').replace(/â€"|â€"/g, '–').replace(/Â/g, ''); } }
+  return s;
+}
+function sortAlerts(list) {
+  // alerts that name a station on your trip come first
+  var a = stationIdx(S.from), b = stationIdx(S.to), names = [];
+  if (S.line && a >= 0 && b >= 0) names = S.line.stations.slice(Math.min(a, b), Math.max(a, b) + 1).map(function (s) { return s.name.toLowerCase().split(/[ /]/)[0]; });
+  function hit(s) { var t = ((s.summary && s.summary.value) + ' ' + (s.description && s.description.value || '')).toLowerCase(); return names.some(function (n) { return n.length > 3 && t.indexOf(n) >= 0; }); }
+  list.forEach(function (s) { s._mine = hit(s); });
+  return list.sort(function (x, y) { return (y._mine ? 1 : 0) - (x._mine ? 1 : 0); });
+}
+function arrRows() { var t = now(); return S.arr ? S.arr.list.filter(function (x) { return x.t >= t - 60000; }) : []; }
 function nextTrain() {
   if (!S.arr || S.arr.key !== arrKey()) return null;
-  return S.arr.list.filter(function (x) { return !x.canceled && x.t >= now() - 30000; })[0] || null;
+  return S.arr.list.filter(function (x) { return !x.canceled && !x.dup && x.t >= now() - 30000; })[0] || null;
+}
+function travelOffset(a, b) {
+  // seconds from station a to station b in any loaded timetable going the same way
+  for (var k in S.trips) {
+    var tt = S.trips[k], ia = -1, ib = -1;
+    for (var i = 0; i < tt.st.length; i++) { var s = stationOfStop(tt.st[i].id); if (s === a && ia < 0) ia = i; else if (s === b && ia >= 0) { ib = i; break; } }
+    if (ia >= 0 && ib >= 0) return tt.st[ib].a - tt.st[ia].d;
+  }
+  return null;
 }
 function arriveAt(x) {
   var tt = S.trips[x.tripId], b = stationIdx(S.to), a = stationIdx(S.from);
-  if (!tt) return null;
+  if (!tt) { var off = travelOffset(a, b); return off != null ? x.t + off * 1000 : null; }
   var seenFrom = false;
   for (var i = 0; i < tt.st.length; i++) {
     var k = stationOfStop(tt.st[i].id);
@@ -756,6 +827,24 @@ function whereText(v) {
   return 'near <b>' + esc(st[s < st[0].s ? 0 : n - 1].name) + '</b>';
 }
 var CHEV = '<svg class="chev" viewBox="0 0 8 13" aria-hidden="true"><path d="M1.5 1.5L6.5 6.5L1.5 11.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+/* Rebuild the sheet only when its content really changed, and never under a finger:
+   a rebuild mid-tap swaps the button out and the tap is lost. */
+var lastSheet = null, pendingSheet = null, pressing = false;
+function setSheet(html) {
+  if (pressing) { pendingSheet = html; return; }
+  pendingSheet = null;
+  if (html === lastSheet) return;
+  lastSheet = html;
+  var foc = document.activeElement, fk = foc && sheetBody.contains(foc) ? (foc.getAttribute('data-act') || foc.getAttribute('data-it') || foc.getAttribute('data-veh') || foc.getAttribute('data-stop')) : null;
+  sheetBody.innerHTML = html;
+  tickTexts();
+  if (fk) { var nf = sheetBody.querySelector('[data-act="' + fk + '"],[data-it="' + fk + '"],[data-veh="' + fk + '"],[data-stop="' + fk + '"]'); if (nf) try { nf.focus({ preventScroll: true }); } catch (e) {} }
+}
+function initPressGuard() {
+  sheetBody.addEventListener('pointerdown', function () { pressing = true; });
+  function up() { if (!pressing) return; setTimeout(function () { pressing = false; if (pendingSheet !== null) setSheet(pendingSheet); }, 350); }
+  window.addEventListener('pointerup', up); window.addEventListener('pointercancel', up);
+}
 function renderSheet() {
   if (!sheetBody) return;
   if (S.plan) { renderPlanSheet(); return; }
@@ -763,7 +852,9 @@ function renderSheet() {
   if (S.selected && S.veh[S.selected]) { renderDetail(S.veh[S.selected]); return; }
   S.selected = null;
   var html = '', n = nextTrain(), y = yourVehicle();
-  if (!S.line || !S.from || !S.to) {
+  if (S.line && (!S.from || !S.to || stationIdx(S.from) < 0 || stationIdx(S.to) < 0)) {
+    html = '<div class="drag-zone"><div class="hero-title" style="font-size:20px;font-weight:700;white-space:normal">Choose your stations</div><div class="hero-sub">Pick where you start and where you are going below.</div></div>';
+  } else if (!S.line || !S.from || !S.to) {
     html = '<div class="drag-zone"><div class="skel" style="height:56px"></div><div class="skel" style="height:44px;margin-top:12px"></div></div>';
   } else if (!S.arr || S.arr.key !== arrKey()) {
     html = '<div class="drag-zone"><div class="skel" style="height:56px"></div><div class="skel" style="height:44px;margin-top:12px"></div></div>';
@@ -785,25 +876,29 @@ function renderSheet() {
       (y && y.v.cur ? '<button class="pill-btn' + (S.follow && !S.selected ? '' : ' tinted') + '" type="button" data-act="follow">' + (S.follow && !S.selected ? 'Following' : 'Follow') + '</button>' : '') + '</div></div>';
   }
   if (S.alerts.length) {
-    var al = S.alerts[0];
-    html += '<details class="alert"' + (S.alertOpen ? ' open' : '') + '><summary>⚠︎ ' + esc(al.summary.value) + (S.alerts.length > 1 ? ' (+' + (S.alerts.length - 1) + ' more)' : '') + '</summary>' +
-      S.alerts.slice(0, 3).map(function (s) { return '<p>' + esc((s.description && s.description.value) || s.summary.value) + '</p>'; }).join('') + '</details>';
+    var al = S.alerts[0], mine = S.alerts.filter(function (s) { return s._mine; }).length;
+    html += '<details class="alert' + (al._mine ? '' : ' other') + '"' + (S.alertOpen ? ' open' : '') + '><summary>' + (al._mine ? '⚠︎ ' : 'ⓘ ') + esc(fixText(al.summary.value)) + (S.alerts.length > 1 ? ' (+' + (S.alerts.length - 1) + ' more)' : '') + '</summary>' +
+      S.alerts.slice(0, 4).map(function (s) { return '<p>' + (s._mine || !mine ? '' : '<b>Elsewhere on the line: </b>') + esc(fixText((s.description && s.description.value) || s.summary.value)) + '</p>'; }).join('') + '</details>';
   }
   html += '<div class="sec">Trip</div><div class="trip-wrap"><div class="group trip">' +
     '<button class="cell" type="button" data-act="pick-from"><span class="dot-o"></span><span class="k">From</span><span class="v">' + esc(S.from || 'Choose a station') + '</span>' + CHEV + '</button>' +
     '<button class="cell" type="button" data-act="pick-to"><span class="dot-d"></span><span class="k">To</span><span class="v">' + esc(S.to || 'Choose a station') + '</span>' + CHEV + '</button></div>' +
     '<button class="swap" type="button" data-act="swap" aria-label="Swap direction"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 4v16M3 8l4-4 4 4M17 20V4M21 16l-4 4-4-4"/></svg></button></div>';
-  if (S.arr && S.arr.key === arrKey() && S.arr.list.length > 1) {
+  var rowsA = arrRows();
+  if (S.arr && S.arr.key === arrKey() && rowsA.length > 1) {
+    var term = S.line && S.line.stations.length ? (stationIdx(S.to) > stationIdx(S.from) ? S.line.stations[S.line.stations.length - 1].name : S.line.stations[0].name) : '';
     html += '<div class="sec"><span>Departures</span><span style="text-transform:none">' + esc(S.from) + '</span></div><div class="group">';
-    S.arr.list.slice(0, 7).forEach(function (x) {
+    rowsA.slice(0, 7).forEach(function (x) {
       var ar = arriveAt(x);
+      // short-turn trains (e.g. ending at Northgate) say so, so you can skip them
+      var shortTurn = x.hs && term && x.hs.toLowerCase().indexOf(term.split(' ')[0].toLowerCase()) < 0 ? '<span class="to-tag">To ' + esc(x.hs) + '</span>' : '';
       html += '<div class="dep' + (x.canceled ? ' canceled' : '') + '"><div class="t num">' + clock(x.t) + '<small>' + (ar ? 'Arrives ' + clock(ar) : '&nbsp;') + '</small></div>' +
-        '<div class="m">' + chip(x.dev, x.live, x.canceled) + '</div><div class="mins num">' + (x.canceled ? '–' : cdHTML(x.t)) + '</div></div>';
+        '<div class="m">' + chip(x.dev, x.live, x.canceled) + shortTurn + '</div><div class="mins num">' + (x.canceled ? '–' : cdHTML(x.t)) + '</div></div>';
     });
     html += '</div>';
   }
   html += '<p class="foot">Live positions from Sound Transit. Trains glide along the track between updates using the timetable and each train\'s current delay. Tap any train for its next stops.</p>';
-  sheetBody.innerHTML = html;
+  setSheet(html);
   tickTexts();
 }
 function renderDetail(v) {
@@ -824,7 +919,7 @@ function renderDetail(v) {
     html += '<div class="sec">Next stops</div><div class="group stops">' + (rows || '<div class="empty">This train has finished its trip.</div>') + '</div>';
   } else html += '<div class="sec">Next stops</div><div class="group"><div class="empty">Loading this train\'s stops…</div></div>';
   html += '<p class="foot">' + (v.predicted ? 'Times include this train\'s current delay.' : 'This train isn\'t sending GPS right now, so its position and times come from the timetable.') + '</p>';
-  sheetBody.innerHTML = html;
+  setSheet(html);
   tickTexts();
   if (!tt) fetchTrip(v.tripId).then(renderSheet, function () {});
 }
@@ -881,12 +976,17 @@ function lineFrame(t, yourId) {
   for (var k in S.veh) {
     var v = S.veh[k]; if (!v.cur) continue;
     if (!v.lv) {
-      v.lv = document.createElement('div');
-      v.lv.addEventListener('click', (function (id) { return function () { setView('map'); select(id); }; })(k));
+      v.lv = document.createElement('button'); v.lv.type = 'button';
+      v.lv.addEventListener('click', (function (id) { return function () { if (!S.noMap) setView('map'); select(id); }; })(k));
       d.appendChild(v.lv);
     }
     var cls = 'lt' + (v.predicted ? '' : ' nogps') + (k === yourId ? ' you' : '');
     if (v.lv.className !== cls) { v.lv.className = cls; v.lv.textContent = isUp(v.dirId) ? '▲' : '▼'; }
+    if (!v.lvAt || t - v.lvAt > 5000) {
+      v.lvAt = t;
+      var dm = Math.round((v.dev || 0) / 60), lab = 'Train to ' + (v.headsign || (isUp(v.dirId) ? 'Lynnwood' : 'Redmond')) + ', ' + (!v.predicted ? 'scheduled' : dm > 0 ? dm + ' min late' : dm < 0 ? -dm + ' min early' : 'on time') + ', ' + whereText(v).replace(/<[^>]+>/g, '');
+      if (v.lv.getAttribute('aria-label') !== lab) v.lv.setAttribute('aria-label', lab);
+    }
     var s = project(up, v.cur).s, fi = 0, st = L.stations;
     if (s <= st[0].s) fi = 0; else if (s >= st[n - 1].s) fi = n - 1;
     else for (var i = 0; i < n - 1; i++) { if (s >= st[i].s && s < st[i + 1].s) { fi = i + (s - st[i].s) / Math.max(1, st[i + 1].s - st[i].s); break; } }
@@ -899,7 +999,7 @@ function setView(view) {
   var lv = $('#lineView'), on = view === 'line';
   lv.classList.toggle('off', !on); lv.setAttribute('aria-hidden', String(!on));
   $('#btnLine').setAttribute('aria-pressed', String(on));
-  sheet.style.visibility = on ? 'hidden' : '';
+  sheet.style.visibility = on && !S.noMap ? 'hidden' : '';   // without a map the departures stay on screen
   document.body.classList.toggle('line-on', on);
   if (on) buildDiagram();
   else for (var k in S.veh) { var v = S.veh[k]; if (v.lv && v.lv.parentNode) v.lv.parentNode.removeChild(v.lv); v.lv = null; }
@@ -910,7 +1010,7 @@ function setView(view) {
 var BUS_ZOOM = 14.5, CELL = 0.012, stopFetched = {}, stopTimer = null, busMarkers = {};
 var BUSSVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 3h12a3 3 0 0 1 3 3v10a2 2 0 0 1-1 1.7V20a1 1 0 0 1-1 1h-1a1 1 0 0 1-1-1v-1H7v1a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-2.3A2 2 0 0 1 3 16V6a3 3 0 0 1 3-3zm0 3v5h12V6H6zm1 8.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm10 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z"/></svg>';
 var DIRS_TXT = { N: 'Northbound', S: 'Southbound', E: 'Eastbound', W: 'Westbound', NE: 'Northeast', NW: 'Northwest', SE: 'Southeast', SW: 'Southwest' };
-function routeColor(r) { return r && r.color ? '#' + String(r.color).replace('#', '') : '#30B0C7'; }
+function routeColor(r) { return r && r.color ? '#' + String(r.color).replace('#', '') : '#1A8597'; }
 function routeText(r) { return r && r.textColor ? '#' + String(r.textColor).replace('#', '') : '#FFFFFF'; }
 function routeName(r) { return r ? (r.shortName || r.nullSafeShortName || r.longName || '') : ''; }
 function rbHTML(r, sm) { return '<span class="rb' + (sm ? ' sm' : '') + '" style="background:' + esc(routeColor(r)) + ';color:' + esc(routeText(r)) + '">' + esc(routeName(r)) + '</span>'; }
@@ -957,9 +1057,9 @@ function busIcon() {
   var g = c.getContext('2d');
   function rr(x, y, ww, hh, r) { g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + ww, y, x + ww, y + hh, r); g.arcTo(x + ww, y + hh, x, y + hh, r); g.arcTo(x, y + hh, x, y, r); g.arcTo(x, y, x + ww, y, r); g.closePath(); }
   rr(1 * k, 1 * k, 24 * k, 24 * k, 7 * k); g.fillStyle = '#FFFFFF'; g.fill();
-  rr(3 * k, 3 * k, 20 * k, 20 * k, 5.5 * k); g.fillStyle = '#30B0C7'; g.fill();
+  rr(3 * k, 3 * k, 20 * k, 20 * k, 5.5 * k); g.fillStyle = '#1A8597'; g.fill();
   g.fillStyle = '#FFFFFF'; rr(8 * k, 7 * k, 10 * k, 10.5 * k, 2.2 * k); g.fill();
-  g.fillStyle = '#30B0C7'; g.fillRect(9.3 * k, 8.6 * k, 7.4 * k, 4 * k);
+  g.fillStyle = '#1A8597'; g.fillRect(9.3 * k, 8.6 * k, 7.4 * k, 4 * k);
   g.fillStyle = '#FFFFFF'; g.fillRect(9 * k, 17.2 * k, 2 * k, 2.3 * k); g.fillRect(15 * k, 17.2 * k, 2 * k, 2.3 * k);
   return { width: w, height: w, data: new Uint8Array(g.getImageData(0, 0, w, w).data.buffer) };
 }
@@ -968,7 +1068,7 @@ function addBusLayers() {
   var dark = isDark();
   if (!map.hasImage('lt-bus-ico')) map.addImage('lt-bus-ico', busIcon(), { pixelRatio: 2 });
   if (map.getSource('lt-bus')) map.getSource('lt-bus').setData(busGeo()); else map.addSource('lt-bus', { type: 'geojson', data: busGeo() });
-  if (!map.getLayer('lt-bus-sel')) map.addLayer({ id: 'lt-bus-sel', type: 'circle', source: 'lt-bus', filter: ['==', ['get', 'sel'], 1], paint: { 'circle-radius': 20, 'circle-color': '#30B0C7', 'circle-opacity': 0.25 } });
+  if (!map.getLayer('lt-bus-sel')) map.addLayer({ id: 'lt-bus-sel', type: 'circle', source: 'lt-bus', filter: ['==', ['get', 'sel'], 1], paint: { 'circle-radius': 20, 'circle-color': '#1A8597', 'circle-opacity': 0.25 } });
   if (!map.getLayer('lt-bus')) map.addLayer({ id: 'lt-bus', type: 'symbol', source: 'lt-bus', layout: {
     'icon-image': 'lt-bus-ico', 'icon-size': ['interpolate', ['linear'], ['zoom'], 14, 0.62, 17, 1, 18, 1.15], 'icon-allow-overlap': true, 'icon-ignore-placement': true,
     'symbol-sort-key': ['get', 'sel'] } });
@@ -1050,7 +1150,7 @@ function tweenMarker(m, to) {
 function obaBrg(ts) {
   // OneBusAway orientation: degrees, 0 = east, counter-clockwise. Convert to a compass bearing.
   var o = ts && ts.orientation;
-  if (typeof o !== 'number' || isNaN(o) || o === 0) return null;
+  if (o === null || o === undefined || typeof o !== 'number' || isNaN(o)) return null;
   return ((90 - o) % 360 + 360) % 360;
 }
 function brgBetween(a, b) {
@@ -1274,20 +1374,24 @@ async function findBus(q) {
   try {
     if (/^\d{4,5}$/.test(q)) {
       // a bus number painted on the bus: try Metro, Sound Transit, Community Transit, Pierce Transit
-      var ags = ['1', '40', '29', '3', '19'];
-      for (var i = 0; i < ags.length && !S.track.vehicles.length; i++) {
-        try {
-          var d = await oba('trip-for-vehicle/' + ags[i] + '_' + q, { includeStatus: true, includeSchedule: false });
-          var rf = indexRefs(d.references), e = d.entry || {}, v = vehFromStatus(e.tripId, e.status, rf);
-          if (v) { S.track.vehicles = [v]; S.track.sel = v.tripId; S.track.follow = true; S.track.vid = v.vehicleId; S.track.routes = [v.routeId]; }
-        } catch (err) { if (!err.notFound) throw err; }
-      }
+      var ags = ['1', '40', '29', '3', '19', '97'];
+      // ask every agency at once (Metro, Sound Transit, Community, Pierce, Intercity, Everett)
+      var found = await Promise.all(ags.map(function (ag) {
+        return oba('trip-for-vehicle/' + ag + '_' + q + '.json', { includeStatus: true, includeSchedule: false }).then(function (d) {
+          var rf = indexRefs(d.references), e = d.entry || {}; return vehFromStatus(e.tripId, e.status, rf);
+        }, function (err) { if (err && err.fatal && !err.notFound) throw err; return null; });
+      }));
+      var v = found.filter(Boolean)[0];
+      if (v) { S.track.vehicles = [v]; S.track.sel = v.tripId; S.track.follow = true; S.track.vid = v.vehicleId; S.track.routes = [v.routeId]; }
     }
     if (!S.track.vehicles.length) {
-      var want = q.toLowerCase().replace(/^route\s*/, ''), ids = Object.keys(S.busRoutes).filter(function (id) { return String(routeName(S.busRoutes[id])).toLowerCase() === want; });
+      var want = q.toLowerCase().replace(/^route\s*/, '').trim();
+      // "E" or "e line" both mean RapidRide E Line
+      function same(r) { var n = String(routeName(r)).toLowerCase(); return n === want || n === want + ' line' || n.replace(/ line$/, '') === want.replace(/ line$/, ''); }
+      var ids = Object.keys(S.busRoutes).filter(function (id) { return same(S.busRoutes[id]); });
       if (!ids.length) {
-        var rd = await oba('routes-for-location', { lat: c.lat.toFixed(5), lon: c.lon.toFixed(5), radius: 25000, query: want });
-        (rd.list || []).forEach(function (r) { S.busRoutes[r.id] = r; if (String(routeName(r)).toLowerCase() === want) ids.push(r.id); });
+        var rd = await oba('routes-for-location.json', { lat: c.lat.toFixed(5), lon: c.lon.toFixed(5), radius: 25000, query: /^[a-z]$/.test(want) ? want.toUpperCase() + ' Line' : want });
+        (rd.list || []).forEach(function (r) { S.busRoutes[r.id] = r; if (same(r)) ids.push(r.id); });
       }
       ids = ids.filter(function (id) { return id !== '40_2LINE' && id !== '40_100479'; }).slice(0, 3);
       if (!ids.length) throw new Error('No route "' + q + '" found near you.');
@@ -1306,7 +1410,7 @@ async function findBus(q) {
 async function loadTrackRoutes() {
   var all = [];
   for (var i = 0; i < S.track.routes.length; i++) {
-    var d = await oba('trips-for-route/' + S.track.routes[i], { includeStatus: true, includeSchedule: false });
+    var d = await oba('trips-for-route/' + S.track.routes[i] + '.json', { includeStatus: true, includeSchedule: false });
     var rf = indexRefs(d.references);
     (d.list || []).forEach(function (x) { var v = vehFromStatus(x.tripId, x.status, rf); if (v && !all.some(function (o) { return o.vehicleId && o.vehicleId === v.vehicleId; })) all.push(v); });
   }
@@ -1318,7 +1422,7 @@ async function refreshTrack() {
   var T = S.track; if (!T || T.loading) return;
   var sv = trackSel();
   if (sv && sv.vehicleId) {
-    var d = await oba('trip-for-vehicle/' + sv.vehicleId, { includeStatus: true, includeSchedule: false });
+    var d = await oba('trip-for-vehicle/' + sv.vehicleId + '.json', { includeStatus: true, includeSchedule: false });
     var rf = indexRefs(d.references), e = d.entry || {}, v = vehFromStatus(e.tripId, e.status, rf);
     if (!S.track || S.track !== T) return;
     if (v) { T.vehicles = T.vehicles.map(function (o) { return o.vehicleId === v.vehicleId ? v : o; }); T.sel = v.tripId; }
@@ -1408,7 +1512,7 @@ function updateBusMarkers() {
 function renderBusSheet() {
   var fi = document.activeElement;
   if (fi && fi.id === 'findInput') return;   // don't wipe what you're typing
-  if (S.track) { sheetBody.innerHTML = trackHTML(); tickTexts(); return; }
+  if (S.track) { setSheet(trackHTML()); return; }
   var html = '';
   var s = S.busSel && S.busStops[S.busSel];
   if (s) {
@@ -1453,7 +1557,7 @@ function renderBusSheet() {
       html += '<div class="sec">&nbsp;</div><div class="group"><button class="cell" type="button" data-act="bus-locate"><span class="loc-ico"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.6 3.4a.9.9 0 0 0-1-.2L3.7 10.1a.9.9 0 0 0 .1 1.7l6.6 1.8 1.8 6.6a.9.9 0 0 0 1.7.1l6.9-15.9a.9.9 0 0 0-.2-1z"/></svg></span><span class="v" style="color:var(--blue)">Show stops near me</span></button></div>';
     }
   }
-  sheetBody.innerHTML = html;
+  setSheet(html);
   tickTexts();
 }
 
@@ -1469,8 +1573,8 @@ function decodePoly(str, prec) {
   return out;
 }
 function openDirs() {
-  D.mode = D.mode || (S.mode === 'buses' ? 'bus' : 'all');
-  D.field = D.to ? 'to' : 'to';
+  D.mode = D.mode || 'all';
+  D.field = 'to';
   setDirTexts();
   $('#dirSearch').value = '';
   renderDirResults([]);
@@ -1505,7 +1609,8 @@ async function geocode(q) {
   var r = await fetch(PLAN_API + 'geocode?text=' + encodeURIComponent(q) + '&place=' + c.lat.toFixed(4) + ',' + c.lon.toFixed(4));
   if (!r.ok) throw new Error('Search isn\'t available right now.');
   var j = await r.json();
-  return (j || []).filter(function (x) { return x && x.lat != null; }).slice(0, 12);
+  // only places in the Puget Sound area (no Bellevue, Texas)
+  return (j || []).filter(function (x) { return x && x.lat != null && x.lat > 46.9 && x.lat < 48.3 && x.lon > -123.2 && x.lon < -121.6; }).slice(0, 12);
 }
 function chooseDir(x) {
   var p = { name: x.name, lat: x.lat, lon: x.lon };
@@ -1514,7 +1619,7 @@ function chooseDir(x) {
   if (D.to && (D.from || S.me)) runPlan();
 }
 function legMin(l) { return Math.max(1, Math.round((Date.parse(l.endTime) - Date.parse(l.startTime)) / 60000)); }
-function legColor(l) { return l.routeColor ? '#' + String(l.routeColor).replace('#', '') : (l.mode === 'WALK' ? '#8E8E93' : '#30B0C7'); }
+function legColor(l) { return l.routeColor ? '#' + String(l.routeColor).replace('#', '') : (l.mode === 'WALK' ? '#8E8E93' : '#1A8597'); }
 function legText(l) { return l.routeTextColor ? '#' + String(l.routeTextColor).replace('#', '') : '#FFFFFF'; }
 function legBadge(l, sm) { return '<span class="rb' + (sm ? ' sm' : '') + '" style="background:' + esc(legColor(l)) + ';color:' + esc(legText(l)) + '">' + esc(l.routeShortName || l.displayName || l.mode) + '</span>'; }
 function placeName(p, end) { return !p || p.name === 'START' ? (D.from ? D.from.name : 'your location') : p.name === 'END' ? (D.to ? D.to.name : 'your destination') : p.name; }
@@ -1704,17 +1809,20 @@ function renderPlanSheet() {
   var P = S.plan, html = '';
   if (P && !P.loading) updateWaitMarker();
   html += '<div class="drag-zone"><div class="d-head"><div class="d-badge" style="background:var(--blue)"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M21.7 11.3l-9-9a1 1 0 0 0-1.4 0l-9 9a1 1 0 0 0 0 1.4l9 9a1 1 0 0 0 1.4 0l9-9a1 1 0 0 0 0-1.4zM14 14.5V12h-4v3H8v-4a1 1 0 0 1 1-1h5V7.5l3.5 3.5-3.5 3.5z"/></svg></div>' +
-    '<div class="d-title"><h2>To ' + esc(P.to) + '</h2><div>From ' + esc(P.from) + ' · ' + (P.mode === 'bus' ? 'Bus only' : 'Bus & train') + '</div></div>' +
+    '<div class="d-title"><h2>To ' + esc(P.to) + '</h2><div>From ' + esc(P.from) + '</div></div>' +
     '<button class="close" type="button" data-act="plan-close" aria-label="Close directions"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button></div></div>';
   if (P.loading) html += '<div class="skel" style="height:84px;margin-top:16px"></div><div class="skel" style="height:84px;margin-top:8px"></div>';
   else if (P.err) html += '<div class="empty">' + esc(P.err) + '</div>';
   else if (!P.its.length) html += '<div class="empty">No trips found right now.' + (P.mode === 'bus' ? ' Try “Bus & train”.' : '') + '</div><div class="group"><button class="cell" type="button" data-act="plan-edit"><span class="v" style="color:var(--blue)">Change trip</span></button></div>';
   else {
+    html += '<div class="chips plan-modes" role="group" aria-label="Travel mode"><button type="button" data-act="plan-mode" data-m="all" aria-pressed="' + (P.mode !== 'bus') + '">Bus & train</button><button type="button" data-act="plan-mode" data-m="bus" aria-pressed="' + (P.mode === 'bus') + '">Bus only</button></div>';
     html += rideCard();
     html += '<div class="sec"><span>Routes</span><button type="button" data-act="plan-edit" style="color:var(--blue);text-transform:none;font-size:15px">Edit</button></div><div class="group">';
     P.its.forEach(function (it, i) {
       var first = it.legs.filter(function (l) { return l.mode !== 'WALK'; })[0];
-      html += '<button class="it' + (i === P.sel ? ' on' : '') + '" type="button" data-it="' + i + '"><div class="row1"><span class="dur num">' + Math.round(it.duration / 60) + ' min</span>' +
+      var fastest = P.its.every(function (o) { return o.duration >= it.duration; }), fewest = it.transfers < Math.min.apply(null, P.its.map(function (o) { return o.transfers; }).filter(function (n, j) { return j !== i; }).concat([99]));
+      var tag = fastest ? '<span class="best">Fastest</span>' : fewest ? '<span class="best alt">Fewest transfers</span>' : '';
+      html += '<button class="it' + (i === P.sel ? ' on' : '') + '" type="button" data-it="' + i + '"><div class="row1"><span class="dur num">' + Math.round(it.duration / 60) + ' min</span>' + tag +
         '<span class="tt num">' + clock(Date.parse(it.startTime)) + ' – ' + clock(Date.parse(it.endTime)) + '</span></div><div class="legs">' + itLegs(it) + '</div>' +
         '<div class="sub">' + (first ? 'Board ' + esc(first.routeShortName || 'at') + ' at ' + esc(first.from.name) + ' · ' + clock(Date.parse(first.startTime)) : 'Walk the whole way') +
         (it.transfers ? ' · ' + it.transfers + (it.transfers === 1 ? ' transfer' : ' transfers') : '') + '</div></button>';
@@ -1738,7 +1846,7 @@ function renderPlanSheet() {
     }
     html += '<p class="foot">Routes are planned with the official timetables by Transitous, a free open trip planner. Times can shift with traffic, so check live bus times in Buses mode before you leave.</p>';
   }
-  sheetBody.innerHTML = html;
+  setSheet(html);
 }
 
 /* ================= station picker ================= */
@@ -1751,7 +1859,19 @@ function openPicker(which, firstRun) {
   renderPicker();
   $('#picker').classList.add('open');
 }
-function closePicker() { $('#picker').classList.remove('open'); pickWhich = null; }
+function closePicker() { if (pickFirstRun && pickWhich) S.pickDismissed = true; $('#picker').classList.remove('open'); pickWhich = null; }
+var ST_ALIAS = [
+  [/univ/i, 'university of washington uw husky stadium udub'], [/u district/i, 'university district udistrict uw'],
+  [/int'?l dist|chinatown/i, 'international district chinatown id'], [/stadium/i, 'sodo stadium'], [/cap(itol)? hill/i, 'capitol hill'],
+  [/westlake/i, 'downtown seattle'], [/bellevue downtown/i, 'downtown bellevue'], [/redmond technology/i, 'microsoft overlake'],
+  [/spring district/i, 'spring district 120th'], [/wilburton/i, 'wilburton'], [/south bellevue/i, 'south bellevue park and ride']];
+function stationMatches(name, q) {
+  var hay = name.toLowerCase().replace(/[^a-z0-9 ]/g, ' ');
+  ST_ALIAS.forEach(function (p) { if (p[0].test(name)) hay += ' ' + p[1]; });
+  return q.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(Boolean).every(function (w) {
+    return hay.split(/\s+/).some(function (h) { return h.indexOf(w) === 0; });
+  });
+}
 function renderPicker() {
   var L = S.line, q = $('#pickSearch').value.trim().toLowerCase(), html = '';
   if (!L) { $('#pickList').innerHTML = '<div class="empty">Loading stations…</div>'; return; }
@@ -1764,9 +1884,9 @@ function renderPicker() {
       (nearest >= 0 ? '<span class="r">' + miles(dist(L.stations[nearest], S.me)) + '</span>' : '') + '</button></div>';
   }
   html += '<div class="sec">2 Line stations</div><div class="group">';
-  var rows = L.stations.map(function (st, i) { return { st: st, i: i }; }).reverse().filter(function (o) { return !q || o.st.name.toLowerCase().indexOf(q) >= 0; });
+  var rows = L.stations.map(function (st, i) { return { st: st, i: i }; }).reverse().filter(function (o) { return !q || stationMatches(o.st.name, q); });
   rows.forEach(function (o) {
-    html += '<button class="cell ind-40" type="button" data-st="' + esc(o.st.name) + '"><span class="st-ico">2</span><span class="v">' + esc(o.st.name) +
+    html += '<button class="cell ind-40" type="button" data-st="' + esc(o.st.name) + '"><span class="st-ico" aria-hidden="true">2</span><span class="v">' + esc(o.st.name) +
       (o.i === nearest ? ' <span class="near">Nearest</span>' : '') + '</span>' + (S.me ? '<span class="r num">' + miles(dist(o.st, S.me)) + '</span>' : '') +
       (o.st.name === cur ? '<span class="check">✓</span>' : '') + '</button>';
   });
@@ -1829,12 +1949,17 @@ function toast(msg) {
 function updateStatus() {
   var el = $('#status'), txt = $('#statusText'), age = S.lastOk ? (now() - S.lastOk) / 1000 : Infinity;
   var cls = 'status glass', label;
-  if (!S.lastOk) { label = S.err ? 'Offline' : 'Connecting…'; if (S.err) cls += ' err'; }
+  if (S.keyBad) { cls += ' err'; label = 'Key rejected'; }
+  else if (!S.lastOk) { label = S.err ? 'Offline' : 'Connecting…'; if (S.err) cls += ' err'; }
   else if (S.err && age > S.refreshSec * 2) { cls += ' err'; label = 'Offline · ' + Math.round(age / 60) + 'm ago'; }
   else if (age > S.refreshSec * 3 + 10) { cls += ' warn'; label = 'Updated ' + Math.round(age / 60) + 'm ago'; }
   else { cls += ' ok'; label = 'Live'; }
   if (el.className !== cls) el.className = cls;
   if (txt.textContent !== label) txt.textContent = label;
+  var aria = label + (S.lastOk ? ', updated ' + Math.max(0, Math.round(age / 60)) + ' min ago' : '') + '. Refresh now';
+  if (el.getAttribute('aria-label') !== aria) el.setAttribute('aria-label', aria);
+  // countdowns older than two refreshes are greyed so a frozen number never looks live
+  document.body.classList.toggle('stale', !!S.keyBad || (!!S.lastOk && age > S.refreshSec * 2 + 15));
 }
 function saveSnap() {
   var keepTrips = {}, veh = {};
@@ -1850,26 +1975,32 @@ function loadSnap() {
   Object.keys(sn.veh || {}).forEach(function (k) { var v = sn.veh[k]; v.lastS = null; v.corr = 0; v.offset = 0; v.tObs = Date.now(); S.veh[k] = v; });
   S.arr = sn.arr; S.lastOk = sn.lastOk || 0;
 }
+function markOk(before, quiet) {
+  if ((S.okCalls || 0) > before) { S.lastOk = now(); S.err = null; }
+  else if (!quiet) S.err = S.keyBad ? 'The API key was rejected. Check it in Settings.' : (S.err || 'No answer from Sound Transit');
+}
 async function refresh(manual) {
-  if (S.busy) return;
+  if (S.busy) { S.again = true; return; }
   S.busy = true;
+  var before = S.okCalls || 0;
   try {
     if (S.plan && S.plan.its) {
       await trackPlanVehicles();
-      S.lastOk = now(); S.err = null;
+      markOk(before, !S.plan.its.some(function (it) { return it.legs.some(function (l) { return l.mode !== 'WALK'; }); }));
       return;
     }
     if (S.mode === 'buses') {
       if (S.track) await refreshTrack();
       else if (S.busSel) await loadStopArrivals();
-      S.lastOk = now(); S.err = null;
+      markOk(before, !S.track && !S.busSel);
       return;
     }
     var full = null;
     if (!S.line) full = await loadLine(false);
     if (S.mode === 'trains' && S.line && (!S.from || stationIdx(S.from) < 0 || !S.to || stationIdx(S.to) < 0)) {
       renderSheet();
-      if (!$('#picker').classList.contains('open')) openPicker(!S.from || stationIdx(S.from) < 0 ? 'from' : 'to', true);
+      // ask once; if you close it, the sheet shows a "Choose stations" card instead of nagging
+      if (!S.pickDismissed && !$('#picker').classList.contains('open')) openPicker(!S.from || stationIdx(S.from) < 0 ? 'from' : 'to', true);
     }
     if (map && mapReady) refreshOverlays();
     var r = full || await oba('trips-for-route/' + CFG.route + '.json', { includeStatus: 'true', includeSchedule: 'false' });
@@ -1877,7 +2008,7 @@ async function refresh(manual) {
     var missing = Object.keys(S.veh).filter(function (k) { return !S.trips[k]; }).slice(0, 4);
     for (var i = 0; i < missing.length; i++) { try { await fetchTrip(missing[i]); } catch (e) { /* draw at GPS until it loads */ } }
     if (S.from && S.to) await loadArrivals();
-    S.lastOk = now(); S.err = null;
+    markOk(before);
     saveSnap();
     if (!refresh.framed && map && S.from && S.to) { refresh.framed = true; fitTrip(true); }
   } catch (e) {
@@ -1888,6 +2019,8 @@ async function refresh(manual) {
     S.busy = false;
     renderSheet();
     if (S.view === 'line') buildDiagram();
+    updateStatus();
+    if (S.again) { S.again = false; setTimeout(function () { refresh(false); }, 50); }
   }
 }
 var lastAuto = 0;
@@ -1897,7 +2030,10 @@ setInterval(function () {
   if (document.visibilityState === 'hidden') return;
   if (Date.now() - lastAuto >= S.refreshSec * 1000) { lastAuto = Date.now(); refresh(false); }
 }, 1000);
-document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') kick(); });
+document.addEventListener('visibilitychange', function () {
+  if (document.visibilityState === 'visible') { kick(); if (S.meWasOn && S.meWatch == null) { S.meWasOn = false; startLocate(false); } }
+  else if (S.meWatch != null && navigator.geolocation) { navigator.geolocation.clearWatch(S.meWatch); S.meWatch = null; S.meWasOn = true; }  // save battery
+});
 
 /* ================= wiring ================= */
 function wire() {
@@ -1929,6 +2065,7 @@ function wire() {
     else if (act === 'track-all') { S.track.sel = null; S.track.follow = false; flatCam(); setTrackVehicles(); fitTrack(); renderSheet(); }
     else if (act === 'track-follow') { S.track.follow = !S.track.follow; var tv = trackSel(); if (S.track.follow && tv) { if (!isSide()) setDetent('peek'); setTimeout(followStart, 60); } else { CAM = null; flatCam(); } renderSheet(); }
     else if (act === 'plan-close') { S.follow = false; clearPlan(); }
+    else if (act === 'plan-mode') { var nm = b.getAttribute('data-m'); if (S.plan && S.plan.mode !== nm) { D.mode = nm; runPlan(); } }
     else if (act === 'plan-follow') { S.follow = !S.follow; if (S.follow && S.detent === 'full') setDetent('mid'); updatePlanMarkers(); renderSheet(); }
     else if (act === 'plan-edit') openDirs();
     else if (act === 'dirs') openDirs();
@@ -1951,9 +2088,9 @@ function wire() {
     if (e.target.closest('[data-cur]')) { D.from = null; D.field = 'to'; setDirTexts(); renderDirResults([]); if (!S.me) startLocate(false); return; }
     var b = e.target.closest('[data-gi]'); if (b) chooseDir(D.results[Number(b.getAttribute('data-gi'))]);
   });
-  $('#btnLine').addEventListener('click', function () { setView(S.view === 'line' ? 'map' : 'line'); });
+  $('#btnLine').addEventListener('click', function () { if (S.noMap) { toast('Map unavailable on this device.'); return; } setView(S.view === 'line' ? 'map' : 'line'); });
   $('#btnCompass').addEventListener('click', function () { if (S.track) S.track.follow = false; S.follow = false; flatCam(); show3D(false); renderSheet(); });
-  $('#btnLocate').addEventListener('click', function () { if (S.view === 'line') setView('map'); startLocate(true); });
+  $('#btnLocate').addEventListener('click', function () { if (S.view === 'line' && !S.noMap) setView('map'); startLocate(true); });
   $('#btnSettings').addEventListener('click', function () {
     $('#keyInput').value = S.key === 'TEST' ? '' : S.key;
     document.querySelectorAll('#segRefresh button').forEach(function (b) { b.setAttribute('aria-pressed', String(Number(b.getAttribute('data-v')) === S.refreshSec)); });
@@ -1978,7 +2115,7 @@ function wire() {
   $('#status').addEventListener('click', kick);
   $('#pickCancel').addEventListener('click', function () {
     if (pickFirstRun) {   // sensible defaults if skipped
-      if (!S.from) S.from = 'Marymoor Village';
+      if (!S.from) S.from = 'Downtown Redmond';
       if (!S.to) S.to = 'Lynnwood City Center';
       if (stationIdx(S.from) < 0 && S.line) S.from = S.line.stations[0].name;
       if (stationIdx(S.to) < 0 && S.line) S.to = S.line.stations[S.line.stations.length - 1].name;
@@ -1995,16 +2132,48 @@ function wire() {
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { closePicker(); closeDirs(); $('#settings').classList.remove('open'); } });
 }
 
+/* ================= panels: focus + inert background ================= */
+function initModals() {
+  var main = ['#map', '.top', '#sheet', '#lineView'].map(function (s) { return $(s); }).filter(Boolean), back = null;
+  document.querySelectorAll('.modal').forEach(function (m) {
+    m.setAttribute('aria-hidden', 'true'); m.inert = true;
+    new MutationObserver(function () {
+      var anyOpen = !!document.querySelector('.modal.open'), open = m.classList.contains('open');
+      if (open === !m.inert) return;
+      m.inert = !open; m.setAttribute('aria-hidden', String(!open));
+      main.forEach(function (el) { el.inert = anyOpen; });
+      if (open) { back = document.activeElement; setTimeout(function () { var f = m.querySelector('input,button,[tabindex]'); if (f && document.activeElement && !m.contains(document.activeElement)) try { f.focus({ preventScroll: true }); } catch (e) {} }, 60); }
+      else if (back && document.body.contains(back)) { try { back.focus({ preventScroll: true }); } catch (e) {} back = null; }
+    }).observe(m, { attributes: true, attributeFilter: ['class'] });
+  });
+  // Trains / Buses tabs: arrow keys
+  var tabs = document.querySelectorAll('.modeseg button');
+  tabs.forEach(function (b, i) { b.addEventListener('keydown', function (e) { if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { var n = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length]; n.focus(); n.click(); } }); });
+}
+
 /* ================= start ================= */
 (function start() {
-  initSheet(); wire();
+  initSheet(); wire(); initPressGuard(); initModals();
   document.body.classList.toggle('mode-bus', S.mode === 'buses');
   document.querySelectorAll('.modeseg button').forEach(function (b) { b.setAttribute('aria-selected', String(b.getAttribute('data-mode') === S.mode)); });
   var c = store.get('line', null);
-  if (c && c.v === 3) finishLine(c);
+  if (c && c.v === 3) {
+    finishLine(c);
+    // older than a week: fetch fresh station and track data in the background
+    if (!c.at || Date.now() - c.at > 7 * 864e5) setTimeout(function () { loadLine(true).then(function () { if (map && mapReady) refreshOverlays(); renderSheet(); }, function () {}); }, 4000);
+  }
   loadSnap();
   renderSheet();
-  initMap();
+  try {
+    if (window.maplibregl && maplibregl.supported && !maplibregl.supported()) throw new Error('no webgl');
+    initMap();
+  } catch (e) {
+    // no WebGL (old phone, battery saver, remote desktop): keep everything else working in the line view
+    map = null; S.noMap = true;
+    document.body.classList.add('no-map');
+    setView('line');
+    setTimeout(function () { toast('Map unavailable on this device. Showing the line view.'); }, 600);
+  }
   requestAnimationFrame(frame);
   if (navigator.permissions && navigator.permissions.query) {
     navigator.permissions.query({ name: 'geolocation' }).then(function (p) { if (p.state === 'granted') startLocate(false); }, function () {});
@@ -2014,6 +2183,14 @@ function wire() {
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
     var hadController = !!navigator.serviceWorker.controller, reloaded = false;
     navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(function (reg) { reg.update(); }).catch(function () {});
-    navigator.serviceWorker.addEventListener('controllerchange', function () { if (hadController && !reloaded) { reloaded = true; location.reload(); } });
+    var openedAt = Date.now();
+    navigator.serviceWorker.addEventListener('controllerchange', function () {
+      if (!hadController || reloaded) return;
+      if (Date.now() - openedAt < 8000 || document.visibilityState === 'hidden') { reloaded = true; location.reload(); return; }
+      if (document.querySelector('.update-bar')) return;
+      var bar = document.createElement('button'); bar.type = 'button'; bar.className = 'update-bar'; bar.textContent = 'New version ready · Tap to reload';
+      bar.addEventListener('click', function () { reloaded = true; location.reload(); });
+      document.body.appendChild(bar);
+    });
   }
 })();
