@@ -363,7 +363,7 @@ function locateTrain(v, t) {
   var tt = S.trips[v.tripId], s;
   var m = tt ? modelS(v, t) : null;
   if (m != null) {
-    s = m + v.offset + v.corr * Math.exp(-(t - v.tObs) / 6000);
+    s = m + v.offset;
     var tot = v.total || tt.st[tt.st.length - 1].s || sh.len;
     v.lastS = s;
     s = s * (sh.len / (tot || sh.len));
@@ -371,7 +371,17 @@ function locateTrain(v, t) {
     s = project(sh, v.pos).s;
     v.lastS = null;
   }
-  return pointAt(sh, s);
+  // Trains only roll forward. When new data says the train is running later than we showed,
+  // it waits in place until the real train catches up instead of sliding backwards.
+  // Only a big disagreement (wrong track piece, > 800 m) is corrected backwards, smoothly.
+  if (v.ds == null || v.dsSh !== sh || Math.abs(s - v.ds) > 5000) { v.ds = s; v.dsSh = sh; v.dsT = t; }
+  else {
+    var dt = clamp(t - (v.dsT || t), 0, 250), k = 1 - Math.exp(-dt / 1100), gap = s - v.ds;
+    if (gap > 0) v.ds += gap * k;
+    else if (gap < -800) v.ds += gap * k * 0.5;
+    v.dsT = t;
+  }
+  return pointAt(sh, v.ds);
 }
 
 /* ================= your departures ================= */
