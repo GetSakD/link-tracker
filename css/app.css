@@ -262,7 +262,7 @@ details.alert.other{background:var(--fill);color:var(--label2)}
 .d-badge.blue{background:var(--blue)}
 .sec .plain{text-transform:none}
 .sec .link{color:var(--blue);text-transform:none;font-size:15px}
-.red{color:var(--red)}
+.text-red{color:var(--red)}
 .mins.small{font-size:15px}
 .cell .sub{display:block;font-size:13px;color:var(--label2);white-space:normal}
 .cell .v .rbs{white-space:normal}

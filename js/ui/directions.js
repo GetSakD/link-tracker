@@ -1,16 +1,17 @@
 /* The directions panel: pick a start and a destination, then plan. */
 import { ICON } from '../config.js';
 import { S, emit } from '../state.js';
-import { geocode } from '../plan.js';
+import { geocode, placeInfo } from '../plan.js';
 import * as P from './parts.js';
 import { openPanel, closePanel, toast } from './panels.js';
-import { $, $$, esc, miles, dist } from '../util.js';
+import { $, $$, esc, miles } from '../util.js';
 import { morph } from './dom.js';
 
 export const D = { from: null, to: null, field: 'to', mode: 'all', results: [], timer: 0 };
 
 export function openDirections() {
-  D.field = 'to';
+  D.field = 'to'; D.searched = false;
+  if (!S.me) emit('needLocation');            // results are ranked by distance from you
   $('#dirSearch').value = '';
   sync(); results([]);
   openPanel('#dirs');
@@ -28,12 +29,13 @@ function results(list) {
   D.results = list;
   let html = '';
   if (D.field === 'from') html += P.section('&nbsp;') + '<div class="group">' + P.cell({ attrs: 'data-cur="1"', ico: `<span class="loc-ico">${ICON.locate}</span>`, text: 'My Location', color: 'var(--blue)' }) + '</div>';
-  if (list.length) html += P.section('Results') + '<div class="group">' + list.map((x, i) => {
-    const area = (x.areas || []).find(a => !/United States|Washington/.test(a.name))?.name;
-    const sub = [x.street ? (x.houseNumber ? x.houseNumber + ' ' : '') + x.street : '', area].filter(Boolean).join(', ');
+  if (list.length) html += P.section(S.me ? 'Near you' : 'Near the map') + '<div class="group">' + list.map((x, i) => {
+    // like Apple and Google Maps: name, then "distance · kind · street, city"
+    const info = placeInfo(x, S.me), sub = [info.km != null ? miles(info.km * 1000) : '', info.kind, info.addr].filter(Boolean).join(' · ');
     return P.cell({ attrs: `data-gi="${i}" data-key="${esc(x.id || x.name + i)}"`, cls: 'ind-40', ico: x.type === 'STOP' ? P.stopIcon() : `<span class="loc-ico red">${ICON.pin}</span>`,
-      text: esc(x.name), sub: sub ? `<span class="sub">${esc(sub)}</span>` : '', right: S.me ? `<span class="r num">${miles(dist(x, S.me))}</span>` : '' });
+      text: esc(x.name), sub: sub ? `<span class="sub">${esc(sub)}</span>` : '' });
   }).join('') + '</div>';
+  else if (D.searched) html += P.empty('No places nearby match that. Try a street address or a different name.');
   else if ($('#dirSearch').value.trim().length >= 2) html += P.empty('Searching…');
   morph($('#dirResults'), html);
 }
@@ -59,9 +61,9 @@ export function initDirections(center) {
   $('#dirSearch').addEventListener('input', function () {
     clearTimeout(D.timer);
     const q = this.value.trim();
-    results([]);
+    D.searched = false; results([]);
     if (q.length < 2) return;
-    D.timer = setTimeout(() => geocode(q, S.me || center()).then(list => { if ($('#dirSearch').value.trim() === q) results(list); }, e => toast(e.message)), 300);
+    D.timer = setTimeout(() => geocode(q, S.me || center()).then(list => { if ($('#dirSearch').value.trim() === q) { D.searched = true; results(list); } }, e => toast(e.message)), 300);
   });
   $('#dirResults').addEventListener('click', e => {
     if (e.target.closest('[data-cur]')) { D.from = null; D.field = 'to'; sync(); results([]); if (!S.me) emit('needLocation'); return; }

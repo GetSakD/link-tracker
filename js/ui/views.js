@@ -149,7 +149,7 @@ function rideCard() {
   let lines;
   if (v === undefined) lines = `Finding your ${kind} live…`;
   else if (!v) lines = `No live signal for this ${kind} yet. It's scheduled to leave at <b>${clock(Date.parse(l.startTime))}</b>.`;
-  else if (v.canceled) lines = '<span class="red">This trip is canceled.</span> Pick another route above.';
+  else if (v.canceled) lines = '<span class="text-red">This trip is canceled.</span> Pick another route above.';
   else {
     const whereNow = v.pos ? (v.stopsAway > 0 ? P.stopsAway(v.stopsAway) : 'arriving now') + (v.near ? `, near <b>${esc(v.near)}</b>` : '') + ` (${miles(dist(v.pos, st || l.from))})` : 'not on the road yet';
     lines = `Your <b>${esc(legName(l))}</b> is ${whereNow}. ${P.chip(v.dev, v.live)}<br>Reaches your stop in <b>${P.countdown(v.t)}</b> · ${clock(v.t)}`;

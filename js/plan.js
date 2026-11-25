@@ -7,10 +7,36 @@ import { busItem } from './buses.js';
 import { setGroup } from './fleet.js';
 import { dist, inRegion, decodePolyline } from './util.js';
 
+/* Place search, the way map apps do it: only places near you, closest first, labelled with
+   street and city (never county or state). */
+const NEAR_KM = 40;
+function city(areas = []) {
+  // OpenStreetMap admin levels in the US: 8 = city/town, 9-10 = neighbourhood, 7 = township, 6 = county, 4 = state
+  const pick = lv => areas.find(a => a.adminLevel === lv)?.name;
+  return pick(8) || pick(7) || pick(9) || pick(10) || '';
+}
+const nice = s => s ? s.replace(/_/g, ' ').replace(/^\w/, c => c.toUpperCase()) : '';
+export function placeInfo(x, from) {
+  const street = x.street ? (x.houseNumber ? x.houseNumber + ' ' : '') + x.street : '';
+  const town = city(x.areas);
+  const kind = x.type === 'STOP' ? 'Transit stop' : x.type === 'PLACE' ? nice(x.category) : '';
+  const addr = x.type === 'ADDRESS' ? town : [street, town].filter(Boolean).join(', ');
+  return { kind, addr, km: from ? dist(x, from) / 1000 : null };
+}
 export async function geocode(q, near) {
-  const r = await fetch(CFG.planner + 'geocode?text=' + encodeURIComponent(q) + '&place=' + near.lat.toFixed(4) + ',' + near.lon.toFixed(4));
+  const bias = near.lat.toFixed(4) + ',' + near.lon.toFixed(4);
+  const dLat = NEAR_KM / 111, dLon = NEAR_KM / (111 * Math.cos(near.lat * Math.PI / 180));
+  const base = CFG.planner + 'geocode?text=' + encodeURIComponent(q) + '&language=en&place=' + bias + '&placeBias=4&numResults=20';
+  const box = '&min=' + (near.lat - dLat).toFixed(4) + ',' + (near.lon - dLon).toFixed(4) + '&max=' + (near.lat + dLat).toFixed(4) + ',' + (near.lon + dLon).toFixed(4);
+  let r = await fetch(base + box).catch(() => null);
+  if (!r || !r.ok) r = await fetch(base);                // older servers without the area filter
   if (!r.ok) throw new Error("Search isn't available right now.");
-  return ((await r.json()) || []).filter(x => x?.lat != null && inRegion(x)).slice(0, 12);    // Puget Sound only
+  const seen = new Set();
+  return ((await r.json()) || [])
+    .filter(x => x?.lat != null && inRegion(x) && dist(x, near) < NEAR_KM * 1000)    // nearby only
+    .filter(x => { const k = x.name + '|' + Math.round(x.lat * 2000) + Math.round(x.lon * 2000); if (seen.has(k)) return false; seen.add(k); return true; })
+    .sort((a, b) => dist(a, near) - dist(b, near))                                    // closest first
+    .slice(0, 12);
 }
 
 export async function plan(from, to, mode) {
