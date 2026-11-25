@@ -3,7 +3,7 @@
 import { ICON, DIRS } from '../config.js';
 import { S, now } from '../state.js';
 import { stationIdx, stationOfStop, hasTrip } from '../line.js';
-import { nextTrain, yourTrain, upcoming, arrivalAt, unconfirmedBefore, whereText, terminus, tripKey } from '../trains.js';
+import { nextTrain, yourTrain, upcoming, arrivalAt, unconfirmedBefore, whereText, terminus, tripKey, gpsFresh, rowFor } from '../trains.js';
 import { trackedBus, nearbyStops } from '../buses.js';
 import { selectedItinerary, firstRide, isRide, legMinutes, legColor, legText, legName } from '../plan.js';
 import { fixText, busNumber, byRouteName, routeName } from '../api.js';
@@ -26,16 +26,18 @@ export function trainsView() {
   else {
     const arrive = arrivalAt(n);
     let wh;
+    const fresh = gpsFresh(y?.v);
     if (y?.v.cur) {
       const w = where(y.v);
       wh = y.prior ? (w.startsWith('at ') ? `Your train is ${w}, getting ready to leave` : `Your train is finishing another trip, now ${w}`)
-        : (y.v.gps ? 'Your train is ' : 'Estimated: your train is ') + w + (n.stopsAway > 0 ? ' · ' + P.stopsAway(n.stopsAway) : '');
-    } else wh = n.live ? "Your train hasn't started its trip yet." : 'No train is reporting for this trip yet. It may not come, so check back in a few minutes.';
+        : (fresh ? 'Your train is ' : 'Estimated: your train is ') + w + (n.stopsAway > 0 ? ' · ' + P.stopsAway(n.stopsAway) : '');
+    } else if (y) wh = 'Finding your train on the map…';                  // known, just not placed yet (its track is loading)
+    else wh = n.live ? "Your train hasn't started its trip yet." : 'No train is reporting for this trip yet. It may not come, so check back in a few minutes.';
     const ub = n.live ? unconfirmedBefore(n) : 0;
     if (ub) wh += `<br><small>${ub === 1 ? 'An earlier train is' : ub + ' earlier trains are'} on the timetable but not reporting, so it isn't counted.</small>`;
     html = `<div class="drag-zone"><div class="hero"><div class="count num${n.live ? ' live' : ''}">${P.countdown(n.t, true)}</div>` +
       `<div class="hero-info"><div class="hero-title">To ${esc(S.to)}</div><div class="hero-sub">${P.chip(n.dev, n.live)} <span class="num">${clock(n.t)}${arrive ? ' → ' + clock(arrive) : ''}</span></div></div></div>` +
-      `<div class="where${y?.v.gps ? '' : ' est'}"><span class="pin"></span><span>${wh}</span>${y?.v.cur ? P.followBtn('follow', S.follow && !S.selected) : ''}</div></div>`;
+      `<div class="where${fresh ? '' : ' est'}"><span class="pin"></span><span>${wh}</span>${y?.v.cur ? P.followBtn('follow', S.follow && !S.selected) : ''}</div></div>`;
   }
   html += alerts();
   html += P.section('Trip') + `<div class="trip-wrap"><div class="group trip">` +
@@ -64,13 +66,20 @@ function alerts() {
 
 function trainDetail(v) {
   const tt = S.trips[v.tripId];
-  let html = P.header('<div class="d-badge">2</div>', 'To ' + (v.headsign || ''), v.predicted ? 'Live GPS' + (v.gpsAt ? ` · updated <span data-ago="${v.gpsAt}"></span>` : '') : 'Estimated from the timetable', 'close', 'Close',
-    `<div class="where${v.gps ? '' : ' est'}"><span class="pin"></span><span>${P.chip(v.dev, v.predicted)} Now ${where(v)}</span>${P.followBtn('follow', S.follow)}</div>`);
+  const fresh = gpsFresh(v);
+  const sub = fresh ? 'Live GPS' + (v.gpsAt ? ` · updated <span data-ago="${v.gpsAt}"></span>` : '')
+    : v.predicted && v.gpsAt ? `Estimated · last GPS <span data-ago="${v.gpsAt}"></span>` : 'Estimated from the timetable';
+  let html = P.header('<div class="d-badge">2</div>', 'To ' + (v.headsign || ''), sub, 'close', 'Close',
+    `<div class="where${fresh ? '' : ' est'}"><span class="pin"></span><span>${P.chip(v.dev, v.predicted)} ${fresh ? 'Now' : 'About'} ${where(v)}</span>${P.followBtn('follow', S.follow)}</div>`);
   html += P.section('Next stops');
   if (!tt) return html + `<div class="group">${P.empty("Loading this train's stops…")}</div>`;
   const tau = (now() - tt.sd) / 1000 - v.dev, a = stationIdx(S.from), b = stationIdx(S.to);
+  // use the same time the Departures list shows for your station, and shift the other stops with it
+  const row = rowFor(v.tripId), atA = tt.st.find(x => stationOfStop(x.id) === a);
+  const shift = row && atA ? Math.max(-300000, Math.min(300000, row.t - (tt.sd + (atA.d + v.dev) * 1000))) : 0;
   const rows = tt.st.filter(x => x.a + 20 >= tau).map(x => {
-    const k = stationOfStop(x.id), name = k >= 0 ? S.line.stations[k].name : (S.stopInfo[x.id]?.name || 'Stop'), eta = tt.sd + (x.a + v.dev) * 1000;
+    const k = stationOfStop(x.id), name = k >= 0 ? S.line.stations[k].name : (S.stopInfo[x.id]?.name || 'Stop');
+    const eta = x === atA && row ? row.t : tt.sd + (x.a + v.dev) * 1000 + shift;
     return `<div class="cell${k === a || k === b ? ' mine' : ''}" data-key="${esc(x.id)}"><span class="tl"></span><span class="v">${esc(name)}</span><span class="r num">${P.countdown(eta)} · ${clock(eta)}</span></div>`;
   }).join('');
   return html + `<div class="group stops">${rows || P.empty('This train has finished its trip.')}</div>` +
@@ -114,7 +123,7 @@ function stopView(s) {
 
 function trackView() {
   const T = S.track, r0 = S.routes[T.routes[0]];
-  const title = T.vehicleId ? 'Bus ' + busNumber(T.vehicleId) : r0 ? 'Route ' + routeName(r0) : `Find "${T.q}"`;
+  const title = T.vehicleId && busNumber(T.vehicleId) ? 'Bus ' + busNumber(T.vehicleId) : r0 ? 'Route ' + routeName(r0) : `Find "${T.q}"`;
   const sub = T.loading ? 'Finding it live…' : T.err ? '' : plural(T.vehicles.length, 'bus', 'buses') + ' on the road now';
   let html = P.header(r0 ? P.routeBadge(r0) : P.stopIcon(true), title, sub, 'track-close', 'Stop tracking');
   if (T.loading) return html + P.skeleton(2, 64);
@@ -126,7 +135,7 @@ function trackView() {
   if (sv) {
     const nx = S.stopInfo[sv.next]?.name, nr = S.stopInfo[sv.near]?.name;
     html += `<div class="ride"><div class="ride-top"><div class="ride-h">To ${esc(sv.headsign || '…')}</div>${P.followBtn('track-follow', T.follow)}</div>` +
-      `<div class="ride-l">${P.chip(Math.round(sv.dev / 60) * 60, true)}${sv.vehicleId ? ` <span class="muted">Bus ${esc(busNumber(sv.vehicleId))}</span>` : ''}` +
+      `<div class="ride-l">${P.chip(Math.round(sv.dev / 60) * 60, true)}${busNumber(sv.vehicleId) ? ` <span class="muted">Bus ${esc(busNumber(sv.vehicleId))}</span>` : ''}` +
       (nr ? `<br>Near <b>${esc(nr)}</b>` : '') + (nx && nx !== nr ? `<br>Next stop <b>${esc(nx)}</b>` : '') +
       (S.me ? `<br>${P.away(sv.pos)} from you` : '') + (sv.at ? `<br><span class="muted">GPS updated <span data-ago="${sv.at}"></span></span>` : '') + '</div></div>';
     if (!T.vehicleId && T.vehicles.length > 1) html += '<div class="group" style="margin-top:10px">' + P.cell({ act: 'track-all', text: `Show all ${T.vehicles.length} buses`, color: 'var(--blue)' }) + '</div>';
@@ -136,7 +145,7 @@ function trackView() {
     const nr = S.stopInfo[v.near]?.name || S.stopInfo[v.next]?.name;
     return `<button class="bdep" type="button" data-veh="${esc(v.tripId)}" data-key="${esc(v.tripId)}">${P.routeBadge(S.routes[v.routeId])}` +
       `<div class="m"><div class="h">To ${esc(v.headsign || '…')}</div><div class="s">${P.chip(Math.round(v.dev / 60) * 60, true)}${nr ? ' near ' + esc(nr) : ''}</div></div>` +
-      `<div class="mins num small">${P.away(v.pos)}<div>Bus ${esc(busNumber(v.vehicleId))}</div></div></button>`;
+      `<div class="mins num small">${P.away(v.pos)}<div>${busNumber(v.vehicleId) ? 'Bus ' + esc(busNumber(v.vehicleId)) : 'Bus'}</div></div></button>`;
   }).join('') + '</div>';
 }
 

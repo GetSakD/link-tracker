@@ -330,3 +330,6 @@ html[data-font="legible"]{--font:"Atkinson Hyperlegible",-apple-system,system-ui
 .zoom-cell{gap:12px}
 .zoom-cell input{flex:1;accent-color:var(--blue)}
 .a-sm{font-size:13px;font-weight:600;color:var(--label2)}.a-lg{font-size:22px;font-weight:600;color:var(--label2)}
+/* line view: only "back to map" is useful, and a single button doesn't cover the Lynnwood column */
+.line-on #btnDir,.line-on #btnLocate,.line-on .rcol>:not(.ctl){display:none}
+.line-on .ctl button#btnLine{border-top:none}

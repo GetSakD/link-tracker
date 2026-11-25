@@ -37,10 +37,13 @@ export function toast(msg) {
 /* ---------- status pill: honest about how fresh the data is ---------- */
 export function updateStatus() {
   const el = $('#status'), age = S.lastOk ? (now() - S.lastOk) / 1000 : Infinity;
+  // say what actually went wrong: Sound Transit rate-limiting us is not the phone being offline
+  const busy = !!S.busyAt && Date.now() - S.busyAt < 60000, offline = navigator.onLine === false;
+  const why = busy ? 'Busy · retrying' : offline ? 'Offline' : 'No answer';
   let cls = 'ok', label = 'Live';
   if (S.keyBad) { cls = 'err'; label = 'Key rejected'; }
-  else if (!S.lastOk) { cls = S.err ? 'err' : ''; label = S.err ? 'Offline' : 'Connecting…'; }
-  else if (S.err && age > S.refreshSec * 2) { cls = 'err'; label = 'Offline · ' + Math.round(age / 60) + 'm ago'; }
+  else if (!S.lastOk) { cls = S.err ? (busy ? 'warn' : 'err') : ''; label = S.err ? why : 'Connecting…'; }
+  else if (S.err && age > S.refreshSec * 2) { cls = busy ? 'warn' : 'err'; label = why + (busy ? '' : ' · ' + Math.round(age / 60) + 'm ago'); }
   else if (age > S.refreshSec * 3 + 10) { cls = 'warn'; label = 'Updated ' + Math.round(age / 60) + 'm ago'; }
   el.className = 'status glass ' + cls;
   $('#statusText').textContent = label;

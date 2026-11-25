@@ -1,8 +1,8 @@
 /* Live 2 Line trains and departures from your station. */
 import { CFG } from './config.js';
 import { S, now } from './state.js';
-import { oba, indexRefs, departures } from './api.js';
-import { stationIdx, stationOfStop, shape, mainShape, ensureShape, cacheTimetable, isUp, tripUp } from './line.js';
+import { oba, indexRefs, departures, passedStop } from './api.js';
+import { stationIdx, stationOfStop, shape, mainShape, ensureShape, shapeFailed, cacheTimetable, isUp, tripUp } from './line.js';
 import { Follower } from './motion.js';
 import { clamp, project, pointAt, headingAt, store } from './util.js';
 
@@ -30,7 +30,8 @@ export function trainShape(v) {
   const id = S.trips[v.tripId]?.shapeId || v.shapeId;
   const sh = id && shape(id);
   if (sh) return sh;
-  if (id) ensureShape(id);
+  // wait for this trip's own track rather than placing the train on a stand-in (it can sit ~1 km off)
+  if (id && !shapeFailed(id)) { ensureShape(id); return null; }
   return shape(v.dirId === L.dirDown && L.shapeDown ? L.shapeDown : L.shapeUp);
 }
 
@@ -48,6 +49,10 @@ function anchor(v, t) {
     }
   } else if (v.predicted && v.sObs != null && Math.abs(v.sObs - m) > 250) v.offset = clamp(v.sObs - m, -3000, 3000);
 }
+
+// a position from GPS older than this is an estimate, and is drawn and labelled as one
+export const GPS_FRESH_MS = 3 * 60000;
+export const gpsFresh = v => !!(v && v.predicted && v.gps && (!v.gpsAt || now() - v.gpsAt < GPS_FRESH_MS));
 
 /* Called every frame: moves the train's Follower and returns its point + heading. */
 export function placeTrain(v, t, dt) {
@@ -107,6 +112,8 @@ export async function fetchTrip(tripId) {
 
 export async function refreshTrains(prefetched) {
   ingest(prefetched || await oba('trips-for-route/' + CFG.route, { includeStatus: 'true', includeSchedule: 'false' }));
+  const need = [...new Set(Object.values(S.trains).map(v => S.trips[v.tripId]?.shapeId || v.shapeId).filter(id => id && !shape(id) && !shapeFailed(id)))];
+  if (need.length) { await Promise.all(need.map(ensureShape)); for (const k in S.trains) anchor(S.trains[k], now()); }
   for (const id of Object.keys(S.trains).filter(k => !S.trips[k]).slice(0, 4)) { try { await fetchTrip(id); } catch { /* drawn at GPS until it loads */ } }
 }
 
@@ -120,7 +127,7 @@ export async function loadDepartures(onMore) {
   const up = b > a, st = L.stations[a], stopId = up ? (st.up || st.down) : (st.down || st.up), want = up ? L.dirUp : L.dirDown;
   const { refs, rows } = await departures(stopId, 120);
   const t = now();
-  let list = rows.filter(x => x.routeId === CFG.route && x.departs && (x.dirId == null || x.dirId === want) && x.t >= t - 60000).sort((p, q) => p.t - q.t);
+  let list = rows.filter(x => x.routeId === CFG.route && x.departs && (x.dirId == null || x.dirId === want) && x.t >= t - HARD_CUTOFF_MS).sort((p, q) => p.t - q.t);
   // the feed sometimes lists one train twice (status DUPLICATED): keep the real one
   list = list.filter(x => !x.dup || !list.some(o => o !== x && !o.dup && ((x.vehicleId && o.vehicleId === x.vehicleId) || Math.abs(o.t - x.t) < 180000))).slice(0, 8);
   S.arr = { key: tripKey(), at: t, list };
@@ -138,14 +145,69 @@ function sortAlerts(list) {
   return list.sort((x, y) => (y.mine ? 1 : 0) - (x.mine ? 1 : 0));
 }
 
-export const upcoming = () => S.arr?.key === tripKey() ? S.arr.list.filter(x => x.t >= now() - 60000) : [];
+/* ---------- which departures are real ----------
+   One rule, used by the big countdown, the list and the map alike. */
+const CUTOFF_MS = 30000;          // a row with no train position goes 30 s after its time
+const HARD_CUTOFF_MS = 3 * 60000; // nothing stays longer than this after its time
+
+// the train that will run this trip: already on it, or finishing the trip before it
+export function trainFor(x) {
+  if (!x) return null;
+  if (S.trains[x.tripId]) return { v: S.trains[x.tripId], prior: false };
+  for (const k in S.trains) if (S.trips[k]?.next === x.tripId) return { v: S.trains[k], prior: true };
+  return null;
+}
+
+// when this trip leaves its first station
+export function tripStart(x) {
+  const tt = S.trips[x.tripId];
+  if (tt?.st.length) return tt.sd + tt.st[0].d * 1000;
+  const a = stationIdx(S.from);
+  for (const k in S.trips) {                    // no timetable yet: borrow the running time from a trip going the same way
+    const o = S.trips[k];
+    if (x.dirId && o.dirId && o.dirId !== x.dirId) continue;
+    const i = o.st.findIndex(s => stationOfStop(s.id) === a);
+    if (i >= 0) return (x.sched || x.t) - (o.st[i].d - o.st[0].d) * 1000;
+  }
+  return null;
+}
+
+// on the timetable, but its start time has passed and no train is running it or the trip before it
+export function isGhost(x) {
+  if (x.live || x.canceled || x.blockLive || trainFor(x)) return false;
+  const start = tripStart(x);
+  return start != null && now() > start + 60000;
+}
+
+// has the train for this row already gone past your station?
+export function trainPassed(x) {
+  const v = S.trains[x.tripId], up = mainShape(), a = stationIdx(S.from);
+  if (!v || !up || a < 0) return false;
+  const p = gpsFresh(v) ? v.gps : v.cur;
+  if (!p) return false;
+  const s = project(up, p).s, sa = S.line.stations[a].s;
+  return isUp(v.dirId) ? s > sa + 80 : s < sa - 80;
+}
+
+export function isGone(x) {
+  const t = now();
+  if (x.t < t - HARD_CUTOFF_MS || passedStop(x) || trainPassed(x)) return true;
+  const v = S.trains[x.tripId];
+  if (v && (gpsFresh(v) || v.cur)) return false;   // we can see it hasn't reached the station yet
+  return x.t < t - CUTOFF_MS;
+}
+
+export const upcoming = () => S.arr?.key === tripKey() ? S.arr.list.filter(x => !isGone(x) && !isGhost(x)) : [];
 
 /* The big countdown is for a train that is actually reporting: timetable-only trips may never show. */
 export function nextTrain() {
-  const rows = upcoming().filter(x => !x.canceled && !x.dup && x.t >= now() - 30000);
+  const rows = upcoming().filter(x => !x.canceled && !x.dup);
   return rows.find(x => x.live) || rows[0] || null;
 }
-export const unconfirmedBefore = n => n ? upcoming().filter(x => !x.canceled && !x.dup && !x.live && x.t >= now() - 30000 && x.t < n.t).length : 0;
+export const unconfirmedBefore = n => n ? upcoming().filter(x => !x.canceled && !x.dup && !x.live && x.t < n.t).length : 0;
+
+// the departure row for a train, so every screen shows the same time for it
+export const rowFor = tripId => S.arr?.key === tripKey() ? S.arr.list.find(x => x.tripId === tripId) || null : null;
 
 export function arrivalAt(x) {
   const a = stationIdx(S.from), b = stationIdx(S.to), tt = S.trips[x.tripId];
@@ -171,12 +233,7 @@ export function arrivalAt(x) {
 }
 
 // your train, or the train that will become it once it finishes its current trip
-export function yourTrain() {
-  const n = nextTrain(); if (!n) return null;
-  if (S.trains[n.tripId]) return { v: S.trains[n.tripId], prior: false };
-  for (const k in S.trains) if (S.trips[k]?.next === n.tripId) return { v: S.trains[k], prior: true };
-  return null;
-}
+export const yourTrain = () => trainFor(nextTrain());
 
 // "at Westlake" / "between X and Y", from where the train is drawn
 export function whereText(v) {

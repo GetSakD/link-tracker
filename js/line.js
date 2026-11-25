@@ -121,12 +121,18 @@ export function restoreLine() {
 }
 
 const pendingShapes = {};
-export async function ensureShape(id) {
-  if (!id || !S.line || S.line.shapes[id] || pendingShapes[id]) return;
-  pendingShapes[id] = 1;
-  try { const sh = await oba('shape/' + encodeURIComponent(id)); S.line.shapes[id] = { pts: decodePolyline(sh.entry?.points) }; }
-  catch { /* the main track shape stands in */ }
-  finally { delete pendingShapes[id]; }
+const failedShapes = {};
+export const shapeFailed = id => !!failedShapes[id] && Date.now() - failedShapes[id] < 120000;   // try again after 2 min
+// loads a trip's track once; callers asking at the same time share the request
+export function ensureShape(id) {
+  if (!id || !S.line || S.line.shapes[id]) return Promise.resolve();
+  return pendingShapes[id] || (pendingShapes[id] = (async () => {
+    try {
+      const sh = await oba('shape/' + encodeURIComponent(id)), pts = decodePolyline(sh.entry?.points);
+      if (pts.length > 1) S.line.shapes[id] = { pts }; else failedShapes[id] = Date.now();
+    } catch { failedShapes[id] = Date.now(); }      // the main track shape stands in
+    finally { delete pendingShapes[id]; }
+  })());
 }
 
 export function stationMatches(name, q) {

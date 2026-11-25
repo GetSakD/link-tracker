@@ -3,6 +3,7 @@ import { S } from '../state.js';
 import { stationIdx, mainShape, isUp } from '../line.js';
 import { where } from './views.js';
 import { $, esc, project } from '../util.js';
+import { gpsFresh } from '../trains.js';
 
 const ROW = 52, PAD = 16;
 const dots = new Map();      // tripId -> button
@@ -34,12 +35,12 @@ export function drawLine(t, yourId, onTap) {
     const v = S.trains[k]; if (!v.cur) continue;
     let b = dots.get(k);
     if (!b) { b = document.createElement('button'); b.type = 'button'; b.addEventListener('click', () => onTap(k)); d.appendChild(b); dots.set(k, b); }
-    const cls = 'lt' + (v.predicted ? '' : ' nogps') + (k === yourId ? ' you' : '');
+    const cls = 'lt' + (gpsFresh(v) ? '' : ' nogps') + (k === yourId ? ' you' : '');
     if (b.className !== cls) { b.className = cls; b.textContent = isUp(v.dirId) ? '▲' : '▼'; }
     if (!b._at || t - b._at > 5000) {
       b._at = t;
       const dm = Math.round(v.dev / 60);
-      b.setAttribute('aria-label', `Train to ${v.headsign || (isUp(v.dirId) ? 'Lynnwood' : 'Redmond')}, ${!v.predicted ? 'scheduled' : dm > 0 ? dm + ' min late' : dm < 0 ? -dm + ' min early' : 'on time'}, ${where(v).replace(/<[^>]+>/g, '')}`);
+      b.setAttribute('aria-label', `Train to ${v.headsign || (isUp(v.dirId) ? 'Lynnwood' : 'Redmond')}, ${!gpsFresh(v) ? 'estimated position' : dm > 0 ? dm + ' min late' : dm < 0 ? -dm + ' min early' : 'on time'}, ${where(v).replace(/<[^>]+>/g, '')}`);
     }
     const s = project(up, v.cur).s;
     let fi = s <= st[0].s ? 0 : n - 1;

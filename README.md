@@ -25,3 +25,9 @@ animation loop moves trains, buses and the camera.
 | `js/map/` | MapLibre layers, icons, camera and follow mode |
 | `js/ui/` | Panel screens (pure functions of state), DOM patching, the spring sheet, panels |
 | `css/app.css` | All styles |
+
+## Tests
+
+`npm test` (or `node --test tests/*.test.mjs`) checks the rules that decide what you see:
+ghost trips, trains that already left, one shared cutoff for the countdown and the list,
+stale GPS shown as an estimate, and King County's no-GPS placeholder buses.

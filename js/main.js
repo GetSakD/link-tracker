@@ -7,7 +7,7 @@ import { addTask, wake } from './loop.js';
 import { initAppearance } from './ui/theme.js';
 import { oba } from './api.js';
 import { loadLine, restoreLine, stationIdx, hasTrip, nearestStation, tripUp, isUp } from './line.js';
-import { refreshTrains, loadDepartures, placeTrain, yourTrain, nextTrain, saveSnapshot, loadSnapshot } from './trains.js';
+import { refreshTrains, loadDepartures, placeTrain, yourTrain, nextTrain, saveSnapshot, loadSnapshot, gpsFresh } from './trains.js';
 import { stopsAround, stopsInView, loadStopDepartures, showStopBuses, findBus, refreshTrackedBus, showTrackedBuses, stopTracking, trackedBus } from './buses.js';
 import { plan, trackPlanRides, showPlanBuses, firstRide } from './plan.js';
 import { fleet, stepFleet } from './fleet.js';
@@ -68,6 +68,8 @@ async function refresh(manual) {
   }
 }
 const kick = () => refresh(true);
+window.addEventListener('online', () => { updateStatus(); refresh(false); });
+window.addEventListener('offline', updateStatus);
 setInterval(() => {
   tick(); updateStatus();
   if (document.visibilityState !== 'hidden' && Date.now() - lastRefresh >= S.refreshSec * 1000) refresh(false);
@@ -76,15 +78,18 @@ setInterval(() => {
 /* ================= animation: one loop for everything that moves ================= */
 addTask((t, dt) => {
   const T = now(), y = yourTrain(), up = tripUp(), items = [];
+  let placed = false;
   for (const k in S.trains) {
     const v = S.trains[k], p = placeTrain(v, T, dt);
     if (!p) continue;
+    if (!v.cur) placed = true;        // first time on the map: redraw the panel now, not at the next refresh
     v.cur = p;
     items.push({ id: k, p, you: k === y?.v.tripId, sel: S.selected === k,
-      kind: k === y?.v.tripId ? 'you' : !v.predicted ? 'nogps' : isUp(v.dirId) === up ? 'live' : 'other' });
+      kind: k === y?.v.tripId ? 'you' : !gpsFresh(v) ? 'nogps' : isUp(v.dirId) === up ? 'live' : 'other' });
   }
   const n = nextTrain(), m = n ? Math.round((n.t - now()) / 60000) : null;
   M.drawTrains(items, n ? 'Your train · ' + (m <= 0 ? 'now' : m + ' min') : 'Your train');
+  if (placed) changed();
   if (S.view === 'line') drawLine(t, y?.v.tripId, id => { if (!S.noMap) setView('map'); selectTrain(id); });
   return items.length > 0 && (S.mode === 'trains' || S.view === 'line');
 });

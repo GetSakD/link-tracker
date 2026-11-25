@@ -5,6 +5,10 @@ import { S, now } from './state.js';
 import { sleep } from './util.js';
 
 let transport = null, netFails = 0, lastCall = 0, queue = Promise.resolve(), cb = 0;
+// after a spell offline the app falls back to JSONP; once back online, try normal requests again
+const resetTransport = () => { if (transport === 'jsonp') { transport = null; netFails = 0; } };
+window.addEventListener('online', resetTransport);
+setInterval(resetTransport, 5 * 60000);
 
 function jsonp(url, ms) {
   return new Promise((resolve, reject) => {
@@ -57,8 +61,8 @@ export async function oba(path, params = {}) {
       if (body) netFails = 0;
       if (body?.currentTime > 1e12) S.clockOffset = body.currentTime - Date.now();
       const code = body?.code;
-      if (code === 200) { S.okCalls++; S.keyBad = false; noteRefs(body.data?.references); return body.data || {}; }
-      if (code === 429) { lastErr = fail('Sound Transit is busy (rate limit). Retrying…'); await sleep(1500 * (attempt + 1)); continue; }
+      if (code === 200) { S.okCalls++; S.keyBad = false; S.busyAt = 0; noteRefs(body.data?.references); return body.data || {}; }
+      if (code === 429) { S.busyAt = Date.now(); lastErr = fail('Sound Transit is busy (rate limit). Retrying…', { busy: true }); await sleep(1500 * (attempt + 1)); continue; }
       if (code === 401) { S.keyBad = true; throw fail('The API key was rejected. Check it in Settings.', { fatal: true }); }
       if (code === 404) throw fail('Not found: ' + path, { fatal: true, notFound: true });
       throw fail(body?.text || 'Error ' + code);
@@ -103,7 +107,12 @@ export function parseDeparture(x, refs) {
     dev: live ? Math.round((pred - sched) / 1000) : 0,
     headsign: x.tripHeadsign || tr.tripHeadsign || '', dirId: tr.directionId != null ? String(tr.directionId) : null,
     vehicleId: ts.vehicleId || x.vehicleId || '',
+    // a real vehicle sends GPS; King County also lists timetable placeholders with no GPS and 7-digit ids
+    gps: realGps(ts), gpsAt: ts.lastLocationUpdateTime || 0,
+    // the vehicle is reporting, but on the trip before this one
+    blockLive: !!(ts.predicted && ts.activeTripId && ts.activeTripId !== x.tripId),
     stopsAway: typeof x.numberOfStopsAway === 'number' ? x.numberOfStopsAway : null,
+    distFromStop: typeof x.distanceFromStop === 'number' ? x.distanceFromStop : null,
     pos: ts.position && (live || ts.predicted) ? { lat: ts.position.lat, lon: ts.position.lon } : null,
     bearing: obaBearing(ts),
     near: S.stopInfo[ts.closestStop]?.name || S.stopInfo[ts.nextStop]?.name || '',
@@ -112,15 +121,29 @@ export function parseDeparture(x, refs) {
     departs: x.departureEnabled !== false
   };
 }
+export const realGps = ts => !!(ts && ((ts.lastLocationUpdateTime || 0) > 0 || ts.lastKnownLocation?.lat));
+
+// the feed says this vehicle has already gone past the stop
+export const passedStop = x => (x.stopsAway != null && x.stopsAway < 0) || (x.distFromStop != null && x.distFromStop < -60 && x.live);
+
 export async function departures(stopId, minutesAfter, minutesBefore = 1) {
   const r = await oba('arrivals-and-departures-for-stop/' + encodeURIComponent(stopId), { minutesBefore, minutesAfter });
   const refs = indexRefs(r.references);
-  return { refs, rows: (r.entry?.arrivalsAndDepartures || []).map(x => parseDeparture(x, refs)) };
+  // one row per trip: a placeholder sometimes repeats a trip a real bus is already running
+  const best = new Map();
+  for (const x of (r.entry?.arrivalsAndDepartures || []).map(x => parseDeparture(x, refs))) {
+    const o = best.get(x.tripId), score = y => (y.gps ? 2 : 0) + (y.live ? 1 : 0);
+    if (!o || score(x) > score(o)) best.set(x.tripId, x);
+  }
+  return { refs, rows: [...best.values()].filter(x => !passedStop(x)) };
 }
 
 // a vehicle from a trip status (trips-for-route, trip-for-vehicle)
 export function vehicleFrom(tripId, st, refs) {
   if (!st?.position || !st.predicted) return null;
+  // no GPS at all (a timetable placeholder), or GPS too old to trust: not a bus we can show
+  if (!realGps(st)) return null;
+  if (st.lastLocationUpdateTime && Date.now() + (S.clockOffset || 0) - st.lastLocationUpdateTime > 5 * 60000) return null;
   const tr = refs?.trips[tripId] || refs?.trips[st.activeTripId] || {};
   const gps = st.lastKnownLocation?.lat ? st.lastKnownLocation : st.position;
   return {
@@ -130,7 +153,8 @@ export function vehicleFrom(tripId, st, refs) {
   };
 }
 
-export const busNumber = vid => String(vid || '').replace(/^\d+_/, '');
+// fleet numbers are 3-5 digits; longer ids are the feed's internal placeholders, not a number on the bus
+export const busNumber = vid => { const n = String(vid || '').replace(/^\d+_/, ''); return /^\d{1,5}$/.test(n) ? n : ''; };
 export const routeName = r => r ? (r.shortName || r.nullSafeShortName || r.longName || '') : '';
 export const routeColor = r => r?.color ? '#' + String(r.color).replace('#', '') : '#1A8597';
 export const routeText = r => r?.textColor ? '#' + String(r.textColor).replace('#', '') : '#FFFFFF';
