@@ -1,12 +1,12 @@
 /* Link Tracker service worker.
    The app itself (HTML/JS) always comes from the network first, so you never get stuck on an old version;
    the saved copy is only used when you're offline. Map tiles are cached for speed. Live data is never cached. */
-var VERSION = 'lt-v4.0.1';
+var VERSION = 'lt-v4.1.0';
 var TILE_CACHE = 'lt-tiles-1', TILE_MAX = 600;
 var LIB = ['https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js', 'https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css'];
 // the app shell, so it opens offline (underground, no signal)
 var SHELL = ['./', 'css/app.css', 'js/main.js', 'js/config.js', 'js/util.js', 'js/state.js', 'js/loop.js', 'js/api.js', 'js/motion.js', 'js/line.js', 'js/trains.js',
-  'js/fleet.js', 'js/buses.js', 'js/plan.js', 'js/map/map.js', 'js/map/icons.js', 'js/ui/dom.js', 'js/ui/parts.js', 'js/ui/views.js', 'js/ui/sheet.js',
+  'js/fleet.js', 'js/buses.js', 'js/plan.js', 'js/realtime.js', 'js/map/map.js', 'js/map/icons.js', 'js/ui/dom.js', 'js/ui/parts.js', 'js/ui/views.js', 'js/ui/sheet.js',
   'js/ui/panels.js', 'js/ui/directions.js', 'js/ui/lineview.js'];
 
 self.addEventListener('install', function (e) {

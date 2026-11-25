@@ -90,9 +90,14 @@ export function obaBearing(ts) {
 // one row of arrivals-and-departures, the same shape for trains, buses and planned trips
 export function parseDeparture(x, refs) {
   const ts = x.tripStatus || {}, tr = refs?.trips[x.tripId] || {};
-  const live = x.predicted === true && ((x.predictedDepartureTime || 0) > 0 || (x.predictedArrivalTime || 0) > 0);
   const sched = x.scheduledDepartureTime || x.scheduledArrivalTime;
-  const pred = live ? (x.predictedDepartureTime || x.predictedArrivalTime) : 0;
+  let live = x.predicted === true && ((x.predictedDepartureTime || 0) > 0 || (x.predictedArrivalTime || 0) > 0);
+  let pred = live ? (x.predictedDepartureTime || x.predictedArrivalTime) : 0;
+  // The vehicle is already on this trip and reporting, but the feed left out a predicted time
+  // (common while a bus waits at the first stop): its live delay still tells us when it will come.
+  if (!live && ts.predicted && ts.activeTripId === x.tripId && typeof ts.scheduleDeviation === 'number') {
+    live = true; pred = sched + ts.scheduleDeviation * 1000;
+  }
   return {
     tripId: x.tripId, routeId: x.routeId, t: pred || sched, sched, live,
     dev: live ? Math.round((pred - sched) / 1000) : 0,

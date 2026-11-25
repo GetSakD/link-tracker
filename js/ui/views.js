@@ -119,7 +119,9 @@ function trackView() {
   let html = P.header(r0 ? P.routeBadge(r0) : P.stopIcon(true), title, sub, 'track-close', 'Stop tracking');
   if (T.loading) return html + P.skeleton(2, 64);
   if (T.err) return html + P.empty(esc(T.err) + ' Try a route like 545, a letter like E, or the 4-digit number on the bus.');
-  if (!T.vehicles.length) return html + P.empty('No live buses on this route right now. It may not be running at this hour.');
+  if (!T.vehicles.length) return html + P.empty(T.routes.every(id => id.startsWith('29_'))
+    ? "Community Transit doesn't share where its buses are with OneBusAway, so they can't be shown on the map. Arrival times at its stops are still live."
+    : 'No live buses on this route right now. It may not be running at this hour.');
   const sv = trackedBus();
   if (sv) {
     const nx = S.stopInfo[sv.next]?.name, nr = S.stopInfo[sv.near]?.name;
@@ -161,7 +163,7 @@ function rideCard() {
 function liveLine(l) {
   const v = l.live;
   if (v === undefined) return '<span class="chip sched">Checking live…</span>';
-  if (!v) return '<span class="chip sched">Scheduled</span>';
+  if (!v) return `<span class="chip sched">${ICON.clock}Scheduled</span>`;
   if (v.canceled) return '<span class="chip cancel">Canceled</span>';
   return [P.chip(v.dev, v.live), v.live && v.stopsAway > 0 ? P.stopsAway(v.stopsAway) : !v.pos ? 'not on the road yet' : '', 'departs ' + clock(v.t)].filter(Boolean).join(' · ');
 }

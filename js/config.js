@@ -38,5 +38,6 @@ export const ICON = {
   close: svg('0 0 12 12', '<path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>', 'width="12" height="12"'),
   chev: svg('0 0 8 13', '<path d="M1.5 1.5L6.5 6.5L1.5 11.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>', 'class="chev"'),
   swap: svg('0 0 24 24', '<path d="M7 4v16M3 8l4-4 4 4M17 20V4M21 16l-4 4-4-4"/>', 'width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"'),
+  clock: svg('0 0 12 12', '<circle cx="6" cy="6" r="4.6"/><path d="M6 3.6V6l1.6 1.2"/>', 'class="ck" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"'),
   live: svg('0 0 12 12', '<path d="M2 10a8 8 0 0 1 8-8"/><path d="M2 10a4 4 0 0 1 4-4"/>', 'class="rt"')
 };

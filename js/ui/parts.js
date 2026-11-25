@@ -31,7 +31,8 @@ export function tick() {
 
 export function chip(dev, live, canceled) {
   if (canceled) return '<span class="chip cancel">Canceled</span>';
-  if (!live) return '<span class="chip sched" title="No vehicle is reporting for this trip yet">Not confirmed</span>';
+  // no live data yet: the timetable time (buses usually start reporting shortly before their trip)
+  if (!live) return `<span class="chip sched" title="No live data yet, so this is the timetable time">${ICON.clock}Scheduled</span>`;
   const m = Math.round(dev / 60);
   return m === 0 ? `<span class="chip ok">${ICON.live}On time</span>` : m > 0 ? `<span class="chip late">${ICON.live}${m} min late</span>` : `<span class="chip early">${ICON.live}${-m} min early</span>`;
 }

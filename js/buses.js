@@ -3,6 +3,7 @@ import { CFG } from './config.js';
 import { S, now } from './state.js';
 import { oba, indexRefs, departures, vehicleFrom, routeName, routeColor, routeText, byRouteName } from './api.js';
 import { setGroup } from './fleet.js';
+import { fillLiveTimes } from './realtime.js';
 import { dist } from './util.js';
 
 /* ---------- stops ---------- */
@@ -37,7 +38,10 @@ export async function loadStopDepartures() {
   const id = S.stop; if (!id) return;
   const { rows } = await departures(id, 90);
   if (id !== S.stop) return;
-  S.stopArr = { id, at: now(), list: rows.filter(x => x.departs && x.t >= now() - 60000).sort((p, q) => p.t - q.t).slice(0, 30) };
+  const list = rows.filter(x => x.departs).slice(0, 40);
+  await fillLiveTimes(S.stops[id], list, x => routeName(S.routes[x.routeId]));      // agencies OneBusAway has no live data for
+  if (id !== S.stop) return;
+  S.stopArr = { id, at: now(), list: list.filter(x => x.t >= now() - 60000).sort((p, q) => p.t - q.t).slice(0, 30) };
   showStopBuses();
 }
 

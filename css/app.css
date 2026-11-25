@@ -59,6 +59,7 @@ input{font:inherit;-webkit-user-select:text;user-select:text}
 .hero-title{font-size:15px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .hero-sub{font-size:13px;color:var(--label2);margin-top:3px}
 .chip{display:inline-flex;align-items:center;gap:5px;height:22px;padding:0 8px;border-radius:11px;font-size:12px;font-weight:600;white-space:nowrap;vertical-align:middle}
+.chip .ck{width:11px;height:11px;flex:none}
 .chip .rt{width:11px;height:11px;flex:none}
 .rt path{fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;animation:rt 1.6s ease-in-out infinite}
 .rt path:nth-child(2){animation-delay:.25s}

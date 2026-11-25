@@ -6,6 +6,7 @@ import { oba, departures, routeName } from './api.js';
 import { busItem } from './buses.js';
 import { setGroup } from './fleet.js';
 import { dist, inRegion, decodePolyline } from './util.js';
+import { fillLiveTimes } from './realtime.js';
 
 /* Place search, the way map apps do it: only places near you, closest first, labelled with
    street and city (never county or state). */
@@ -81,6 +82,7 @@ export async function trackPlanRides() {
       const target = Date.parse(l.scheduledStartTime || l.startTime);
       const pick = rows.filter(x => sameRoute(routeName(S.routes[x.routeId]), legName(l)) && Math.abs(x.sched - target) < 6 * 60000)
         .sort((a, b) => Math.abs(a.sched - target) - Math.abs(b.sched - target))[0];
+      if (pick && !pick.live) await fillLiveTimes(l.stop, [pick], () => legName(l));
       l.live = pick || null;
     } catch { /* keep the timetable version of this ride */ }
     if (S.plan !== P || P.sel !== sel) return;
