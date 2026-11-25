@@ -7,7 +7,13 @@ export const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;'
 export const sleep = ms => new Promise(r => setTimeout(r, ms));
 export const clamp = (x, a, b) => x < a ? a : x > b ? b : x;
 export const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
-export const isDark = () => !!window.matchMedia?.('(prefers-color-scheme: dark)').matches;
+const DARK_THEMES = { dark: true, forest: true }, LIGHT_THEMES = { light: true, paper: true, violet: true };
+export const isDark = () => {
+  const t = document.documentElement.dataset.theme;
+  if (DARK_THEMES[t]) return true;
+  if (LIGHT_THEMES[t]) return false;
+  return !!window.matchMedia?.('(prefers-color-scheme: dark)').matches;
+};
 export const plural = (n, one, many = one + 's') => n + ' ' + (n === 1 ? one : many);
 
 // localStorage that never throws (private mode, full disk)

@@ -4,6 +4,7 @@
 import { CFG } from './config.js';
 import { S, now, on, emit, changed } from './state.js';
 import { addTask, wake } from './loop.js';
+import { initAppearance } from './ui/theme.js';
 import { oba } from './api.js';
 import { loadLine, restoreLine, stationIdx, hasTrip, nearestStation, tripUp, isUp } from './line.js';
 import { refreshTrains, loadDepartures, placeTrain, yourTrain, nextTrain, saveSnapshot, loadSnapshot } from './trains.js';
@@ -240,6 +241,7 @@ const ACTIONS = {
   'plan-edit': openDirections
 };
 function wire() {
+  initAppearance();
   body.addEventListener('click', e => {
     const it = e.target.closest('[data-it]');
     if (it && S.plan) { S.plan.sel = Number(it.dataset.it); M.refreshPlan(true); showPlanBuses(); changed(); trackPlanRides().then(changed); return; }
@@ -324,7 +326,11 @@ function registerWorker() {
   if (!('serviceWorker' in navigator) || location.protocol !== 'https:') return;
   const had = !!navigator.serviceWorker.controller, opened = Date.now();
   let reloaded = false;
-  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(r => r.update()).catch(() => {});
+  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(r => {
+    r.update();
+    // the app opens from the saved copy, so look for a new version whenever it comes back to the screen
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') r.update().catch(() => {}); });
+  }).catch(() => {});
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (!had || reloaded) return;
     // reload by itself only right after opening; otherwise offer it

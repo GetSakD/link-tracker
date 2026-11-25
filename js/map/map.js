@@ -2,7 +2,7 @@
    they move in the same frame as the map when you pan or pinch — page-element markers lag a frame
    behind and feel sticky. Layers only re-upload when something moved at least half a pixel. */
 import { CFG, COLORS } from '../config.js';
-import { S, emit } from '../state.js';
+import { S, emit, on } from '../state.js';
 import { stationIdx, mainShape, hasTrip } from '../line.js';
 import { fleet, knownShape } from '../fleet.js';
 import { selectedItinerary, isRide, legColor, legPath } from '../plan.js';
@@ -50,7 +50,9 @@ export function initMap() {
   clickable('lt-tr', p => emit('trainTap', p.id));
   clickable('lt-veh', p => emit('busTap', { id: p.id, group: p.g }));
   clickable('lt-bus', p => emit('stopTap', p.id));
-  window.matchMedia?.('(prefers-color-scheme: dark)').addEventListener('change', () => { ready = false; map.setStyle(styleUrl(), { diff: false }); });
+  const restyle = () => { ready = false; map.setStyle(styleUrl(), { diff: false }); };
+  window.matchMedia?.('(prefers-color-scheme: dark)').addEventListener('change', () => { if (!document.documentElement.dataset.theme || document.documentElement.dataset.theme === 'auto') restyle(); });
+  on('themeChanged', restyle);
 }
 export const mapReady = () => !!map && ready;
 
