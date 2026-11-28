@@ -264,7 +264,15 @@ function wire() {
     b.addEventListener('click', () => setMode(b.dataset.mode));
     b.addEventListener('keydown', e => { if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { const n = all[(i + (e.key === 'ArrowRight' ? 1 : all.length - 1)) % all.length]; n.focus(); n.click(); } });
   });
-  $('#status').addEventListener('click', kick);
+  // tapping the status light refreshes now and says what it's connected with
+  $('#status').addEventListener('click', async () => {
+    toast('Refreshing…');
+    await refresh(true);
+    if (S.keyBad) return toast('Your API key was rejected. Check it in Settings.');
+    if (S.err && !S.lastOk) return;                         // refresh already showed the error
+    const own = S.key && S.key !== 'TEST';
+    toast(`Up to date · ${own ? 'your own API key' : 'shared TEST key'} · updates every ${S.refreshSec} s`);
+  });
   $('#btnDir').addEventListener('click', openDirections);
   $('#btnLine').addEventListener('click', () => S.noMap ? toast('Map unavailable on this device.') : setView(S.view === 'line' ? 'map' : 'line'));
   $('#btnLocate').addEventListener('click', () => { if (S.view === 'line' && !S.noMap) setView('map'); locate(true); });
