@@ -124,7 +124,7 @@ export function cacheTimetable(tripId, sched, serviceDate, trip) {
 }
 
 /* ---------- which train lines exist ----------
-   Sound Transit's rail routes (Link light rail, the T Line, Sounder), found at startup so new lines appear by themselves. */
+   Sound Transit's rail routes, found at startup; the app shows the ones in CFG.lines (1 Line and 2 Line). */
 const FALLBACK = [
   { id: '40_100479', shortName: '1 Line', longName: 'Lynnwood City Center - Federal Way Downtown', color: '28813F', textColor: 'FFFFFF', type: 0 },
   { id: '40_2LINE', shortName: '2 Line', longName: 'Lynnwood City Center - Downtown Redmond', color: '007CAD', textColor: 'FFFFFF', type: 0 }
@@ -132,6 +132,8 @@ const FALLBACK = [
 const order = r => { const n = r.shortName || r.longName || ''; return (/^\d/.test(n) ? '0' : /^[A-Z] Line/i.test(n) ? '1' : '2') + n.padStart(8); };
 const meta = r => ({ route: r.id, name: r.shortName || r.longName || 'Train', long: r.longName || '', color: '#' + (r.color || '007CAD'), text: '#' + (r.textColor || 'FFFFFF') });
 
+// only the lines chosen in config (1 Line and 2 Line); other rail routes are still kept out of bus lists
+const shown = list => list.filter(x => !CFG.lines?.length || CFG.lines.includes(x.route || x.id));
 export async function discoverLines(force) {
   const c = store.get('railRoutes', null);
   if (!force && c?.v === V && Date.now() - c.at < WEEK && c.list?.length) return c.list;
@@ -208,8 +210,8 @@ async function lineFromStops(m) {
    Returns { routeId: trips-for-route response } for the lines loaded now. */
 let background = null;
 export async function loadLines(force) {
-  const list = await discoverLines(force);
-  S.railRoutes = new Set(list.map(x => x.route));
+  const every = await discoverLines(force), list = shown(every);
+  S.railRoutes = new Set(every.map(x => x.route));
   const known = new Set([...stationLines(S.from), ...stationLines(S.to)]);
   const now = list.filter(m => known.size ? known.has(m.route) : list.indexOf(m) < 2);
   const later = list.filter(m => !now.includes(m));
@@ -239,10 +241,11 @@ export function restoreLines() {
   if (c?.v !== V || !c.list?.length) return false;
   let stale = Date.now() - c.at > WEEK;
   for (const m of c.list) {
+    if (!shown([m]).length) { store.del('ln:' + m.route); continue; }     // a line no longer shown: forget it
     const L = store.get('ln:' + m.route, null);
     if (L?.v === V) { install(L); stale = stale || Date.now() - L.at > WEEK; }
   }
-  S.lineOrder = c.list.map(x => x.route).filter(id => S.lines[id]);
+  S.lineOrder = shown(c.list).map(x => x.route).filter(id => S.lines[id]);
   S.railRoutes = new Set(c.list.map(x => x.route));
   if (!S.lineOrder.length) return false;
   chooseLine();

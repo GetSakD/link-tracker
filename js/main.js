@@ -1,4 +1,4 @@
-/* Link Tracker — live Sound Transit trains (1 Line, 2 Line, T Line, Sounder) and Puget Sound buses.
+/* Link Tracker — live 1 Line and 2 Line trains and Puget Sound buses.
    Data flows one way: refresh() pulls from the feeds into S → changed() → render() draws the panel,
    and one animation loop moves trains, buses and the camera every frame. */
 import { CFG } from './config.js';

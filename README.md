@@ -28,7 +28,7 @@ animation loop moves trains, buses and the camera.
 
 ## Train lines
 
-The app finds Sound Transit's train lines (1 Line, 2 Line, T Line, Sounder) from OneBusAway at startup, so new lines show up by themselves. Where lines share track (the 1 and 2 Lines between Lynnwood and International District), departures from both are merged. Trips that need a change of trains count down to the first train and say where to change.
+The app shows the 1 Line and 2 Line (set in `CFG.lines` in js/config.js; add a route id there to show another line). Where lines share track (the 1 and 2 Lines between Lynnwood and International District), departures from both are merged. Trips that need a change of trains count down to the first train and say where to change.
 
 ## Tests
 

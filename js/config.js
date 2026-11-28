@@ -4,6 +4,7 @@ export const CFG = {
   planner: window.PLAN_API || 'https://api.transitous.org/api/v1/',
   tz: 'America/Los_Angeles',
   route: '40_2LINE',
+  lines: ['40_100479', '40_2LINE'],                   // the train lines the app shows: 1 Line and 2 Line
   otherLinkRoutes: ['40_2LINE', '40_100479'],          // Link rail routes, never shown as buses
   north: { lat: 47.8155, lon: -122.2950 },             // Lynnwood City Center, the 2 Line's north end
   styleLight: window.MAP_STYLE_LIGHT || 'https://tiles.openfreemap.org/styles/positron',

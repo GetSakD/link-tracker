@@ -10,7 +10,7 @@ export const S = {
   from: store.get('from', null), to: store.get('to', null),
   // data from Sound Transit
   lines: {},          // routeId -> train line: stations, platforms, directions
-  lineOrder: [],       // route ids in display order (1 Line, 2 Line, T Line, Sounder…)
+  lineOrder: [],       // route ids in display order (1 Line, 2 Line)
   railRoutes: new Set(),
   line: null,          // the line your trip rides
   shapes: {},          // shapeId -> track
