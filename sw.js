@@ -2,7 +2,7 @@
    The app opens instantly from the copy saved on the phone (no waiting on a weak signal in a station).
    Every deploy changes VERSION, so the browser installs the new copy in the background and the app
    offers "New version ready". Map tiles are cached for speed. Live data is never cached. */
-var VERSION = 'lt-v4.3.2';
+var VERSION = 'lt-v4.3.3';
 var TILE_CACHE = 'lt-tiles-1', TILE_MAX = 600;
 var LIB = ['https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js', 'https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css'];
 // the app shell, so it opens offline (underground, no signal)

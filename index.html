@@ -19,7 +19,7 @@
 <link rel="preconnect" href="https://api.pugetsound.onebusaway.org">
 <link rel="preconnect" href="https://tiles.openfreemap.org">
 <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
-<link rel="stylesheet" href="css/app.css?v=4.3.2">
+<link rel="stylesheet" href="css/app.css?v=4.3.3">
 <!-- fetch every module at once instead of one import at a time -->
 <link rel="modulepreload" href="js/config.js">
 <link rel="modulepreload" href="js/util.js">
@@ -127,7 +127,7 @@
       </div></div></div>
       <p class="note">How often the app asks Sound Transit for new train positions. Trains glide smoothly in between.</p>
       <div class="sec">Sound Transit API key</div>
-      <div class="group"><label class="cell"><input class="field" id="keyInput" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="TEST" aria-label="API key"></label></div>
+      <div class="group"><div class="cell"><input class="field masked" id="keyInput" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="TEST" aria-label="API key"><button type="button" class="key-show" id="keyShow" aria-pressed="false">Show</button></div></div>
       <p class="note">The app works with the shared TEST key. For the most reliable updates, request your own free key by emailing oba_api_key@soundtransit.org with your name, your email address, and a note that you agree to Sound Transit's Transit Data Terms of Use.</p>
       <div class="sec">About</div>
       <div class="group"><button class="cell" id="resetData" type="button"><span class="v" style="color:var(--blue)">Reload line data</span></button></div>
@@ -140,6 +140,6 @@
 <div class="hint glass hidden" id="hint">Zoom in to see bus stops</div>
 
 <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
-<script type="module" src="js/main.js?v=4.3.2"></script>
+<script type="module" src="js/main.js?v=4.3.3"></script>
 </body>
 </html>

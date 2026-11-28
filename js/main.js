@@ -264,6 +264,11 @@ function wire() {
     b.addEventListener('click', () => setMode(b.dataset.mode));
     b.addEventListener('keydown', e => { if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { const n = all[(i + (e.key === 'ArrowRight' ? 1 : all.length - 1)) % all.length]; n.focus(); n.click(); } });
   });
+  $('#keyShow').addEventListener('click', e => {
+    const hidden = $('#keyInput').classList.toggle('masked');
+    e.currentTarget.textContent = hidden ? 'Show' : 'Hide';
+    e.currentTarget.setAttribute('aria-pressed', String(!hidden));
+  });
   // tapping the status light refreshes now and says what it's connected with
   $('#status').addEventListener('click', async () => {
     toast('Refreshing…');

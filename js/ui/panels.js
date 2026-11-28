@@ -103,6 +103,7 @@ export function skipPicker() {
 /* ---------- settings ---------- */
 export function openSettings() {
   $('#keyInput').value = S.key === 'TEST' ? '' : S.key;
+  $('#keyInput').classList.add('masked'); $('#keyShow').textContent = 'Show'; $('#keyShow').setAttribute('aria-pressed', 'false');
   $$('#segRefresh button').forEach(b => b.setAttribute('aria-pressed', String(Number(b.dataset.v) === S.refreshSec)));
   openPanel('#settings');
 }
