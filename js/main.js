@@ -307,7 +307,17 @@ function wire() {
 }
 
 /* ================= start ================= */
+// a one-time setup link (…/link-tracker/?key=…) saves your API key on this phone, then removes it from the address
+function keyFromLink() {
+  const u = new URL(location.href), k = (u.searchParams.get('key') || '').trim();
+  if (!k) return;
+  if (/^[A-Za-z0-9-]{8,64}$/.test(k)) { S.key = k; S.keyBad = false; store.set('key', k); setTimeout(() => toast('API key saved on this phone'), 800); }
+  u.searchParams.delete('key');
+  history.replaceState(null, '', u.pathname + (u.search || '') + u.hash);
+}
+
 function start() {
+  keyFromLink();
   M.setPanelSource(() => [visibleHeight(), isSide()]);
   initSheet(); initPanels(); initDirections(() => M.center() || CFG.north); wire();
   document.body.classList.toggle('mode-bus', S.mode === 'buses');
