@@ -19,10 +19,11 @@ function shade(hex, k) {
 }
 const measure = (text, font) => { const c = document.createElement('canvas').getContext('2d'); c.font = font; return c.measureText(text).width; };
 
-/* train: a round "2" badge. kinds: live (your direction), other (opposite), nogps (dashed), you */
-export function trainBadge(kind) {
-  const you = kind === 'you', S0 = you ? 40 : 30, dark = isDark();
-  const fill = { other: '#8E8E93', nogps: dark ? '#2C2C2E' : '#FFFFFF', you: cssVar('--blue') || '#0A84FF' }[kind] || cssVar('--line') || '#007CAD';
+/* train: a round badge with its line's letter. kinds: live (a train you could take), other (any other train,
+   paler), nogps (dashed: position estimated), you (your train, blue) */
+export function trainBadge(kind, label = '2', color = '#007CAD', text = '#FFFFFF', size = 30) {
+  const you = kind === 'you', S0 = you ? Math.round(size * 4 / 3) : size, dark = isDark();
+  const fill = { other: shade(color, dark ? -0.35 : 0.42), nogps: dark ? '#2C2C2E' : '#FFFFFF', you: cssVar('--blue') || '#0A84FF' }[kind] || color;
   return paint(S0, S0, c => {
     const cx = S0 / 2, r = S0 / 2 - 3;
     c.shadowColor = 'rgba(0,0,0,.3)'; c.shadowBlur = 5; c.shadowOffsetY = 1.5;
@@ -31,19 +32,54 @@ export function trainBadge(kind) {
     c.lineWidth = 2.5; c.strokeStyle = kind === 'nogps' ? (dark ? '#AEAEB2' : '#6C6C70') : '#FFFFFF';
     if (kind === 'nogps') c.setLineDash([3, 2.5]);
     c.beginPath(); c.arc(cx, cx, r - 1.25, 0, Math.PI * 2); c.stroke(); c.setLineDash([]);
-    c.fillStyle = kind === 'nogps' ? (dark ? '#EBEBF5' : '#3C3C43') : '#FFFFFF';
-    c.font = `700 ${you ? 15 : 12}px ${ROUND}`; c.textAlign = 'center'; c.textBaseline = 'middle';
-    c.fillText('2', cx, cx + 0.5);
+    c.fillStyle = kind === 'nogps' ? (dark ? '#EBEBF5' : '#3C3C43') : kind === 'live' ? text : '#FFFFFF';
+    c.font = `700 ${Math.round(S0 * 0.38)}px ${ROUND}`; c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillText(label, cx, cx + 0.5);
   });
 }
-export function trainArrow(kind) {
+export function trainArrow(kind, color = '#007CAD') {
   const S0 = kind === 'you' ? 52 : 42;
-  const col = kind === 'you' ? cssVar('--blue') || '#0A84FF' : kind === 'live' ? cssVar('--line') || '#007CAD' : '#8E8E93';
+  const col = kind === 'you' ? cssVar('--blue') || '#0A84FF' : kind === 'other' ? shade(color, isDark() ? -0.35 : 0.42) : kind === 'nogps' ? '#8E8E93' : color;
   return paint(S0, S0, c => {
     c.shadowColor = 'rgba(255,255,255,.9)'; c.shadowBlur = 2;
     c.beginPath(); c.moveTo(S0 / 2, 0.5); c.lineTo(S0 / 2 + 5, 7.5); c.lineTo(S0 / 2 - 5, 7.5); c.closePath(); c.fillStyle = col; c.fill();
   });
 }
+/* a two-car light-rail train seen from above, nose up, in its line's colour. It turns with the track like the buses do.
+   kinds: live, other (paler), nogps (outlined: position estimated), you (blue) */
+export function trainTop(kind, color = '#007CAD') {
+  const dark = isDark(), W = 30, H = 86;
+  const body = { you: cssVar('--blue') || '#0A84FF', other: shade(color, dark ? -0.3 : 0.38), nogps: dark ? '#3A3A3C' : '#F2F2F7' }[kind] || color;
+  const edge = kind === 'nogps' ? (dark ? '#AEAEB2' : '#6C6C70') : '#FFFFFF';
+  return paint(W, H, c => {
+    const x = 6, w = W - 12, car = (H - 12) / 2 - 1.5;
+    const carPath = (y, front) => {
+      const r = front ? 8 : 4;          // rounded nose on the leading car
+      c.beginPath(); c.moveTo(x + r, y); c.lineTo(x + w - r, y); c.quadraticCurveTo(x + w, y, x + w, y + r);
+      c.lineTo(x + w, y + car - 3); c.quadraticCurveTo(x + w, y + car, x + w - 3, y + car); c.lineTo(x + 3, y + car);
+      c.quadraticCurveTo(x, y + car, x, y + car - 3); c.lineTo(x, y + r); c.quadraticCurveTo(x, y, x + r, y); c.closePath();
+    };
+    const y1 = 5, y2 = y1 + car + 3;
+    // soft shadow
+    c.shadowColor = 'rgba(0,0,0,.35)'; c.shadowBlur = 5; c.shadowOffsetY = 1.5;
+    for (const [y, f] of [[y1, true], [y2, false]]) { carPath(y, f); c.fillStyle = body; c.fill(); }
+    c.shadowColor = 'transparent';
+    // outline
+    c.lineWidth = 1.8; c.strokeStyle = edge;
+    if (kind === 'nogps') c.setLineDash([3, 2.2]);
+    for (const [y, f] of [[y1, true], [y2, false]]) { carPath(y, f); c.stroke(); }
+    c.setLineDash([]);
+    // the bellows between the cars
+    c.fillStyle = kind === 'nogps' ? edge : shade(body.startsWith('#') ? body : '#888888', -0.35);
+    c.fillRect(x + 4, y1 + car - 0.5, w - 8, 4);
+    // windscreen at the front, and a stripe along the roof
+    c.fillStyle = 'rgba(10,20,30,.55)';
+    c.beginPath(); c.moveTo(x + 4, y1 + 9); c.quadraticCurveTo(W / 2, y1 + 2.5, x + w - 4, y1 + 9); c.lineTo(x + w - 3.5, y1 + 12); c.quadraticCurveTo(W / 2, y1 + 7, x + 3.5, y1 + 12); c.closePath(); c.fill();
+    c.fillStyle = kind === 'nogps' ? 'rgba(120,120,128,.35)' : 'rgba(255,255,255,.28)';
+    c.fillRect(W / 2 - 2, y1 + 15, 4, car - 19); c.fillRect(W / 2 - 2, y2 + 4, 4, car - 9);
+  });
+}
+
 /* "Your train · 4 min" tag; redrawn only when the text changes */
 export function tag(text) {
   const font = '600 12px -apple-system, system-ui, sans-serif', W = Math.ceil(measure(text, font)) + 20;

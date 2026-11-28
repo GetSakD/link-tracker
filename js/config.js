@@ -24,7 +24,9 @@ export const STATION_ALIASES = [
   [/univ/i, 'university of washington uw husky stadium udub'], [/u district/i, 'university district udistrict uw'],
   [/int'?l dist|chinatown/i, 'international district chinatown id'], [/stadium/i, 'sodo stadium'], [/cap(itol)? hill/i, 'capitol hill'],
   [/westlake/i, 'downtown seattle'], [/bellevue downtown/i, 'downtown bellevue'], [/redmond technology/i, 'microsoft overlake'],
-  [/spring district/i, 'spring district 120th'], [/wilburton/i, 'wilburton'], [/south bellevue/i, 'south bellevue park and ride']
+  [/spring district/i, 'spring district 120th'], [/wilburton/i, 'wilburton'], [/south bellevue/i, 'south bellevue park and ride'],
+  [/seatac|airport/i, 'airport seatac sea tac sea-tac'], [/federal way/i, 'federal way fw'], [/tukwila/i, 'tukwila international boulevard'],
+  [/tacoma dome/i, 'tacoma dome'], [/king st/i, 'king street station amtrak']
 ];
 
 const svg = (vb, body, attrs = '') => `<svg viewBox="${vb}" ${attrs} aria-hidden="true">${body}</svg>`;

@@ -2,8 +2,8 @@
    main.js decides which one to show; morph() applies it without rebuilding what didn't change. */
 import { ICON, DIRS } from '../config.js';
 import { S, now } from '../state.js';
-import { stationIdx, stationOfStop, hasTrip } from '../line.js';
-import { nextTrain, yourTrain, upcoming, arrivalAt, unconfirmedBefore, whereText, terminus, tripKey, gpsFresh, rowFor } from '../trains.js';
+import { stationIdx, stationOfStop, hasTrip, lineOf, tripLines, transferFor, rideTo, canRide, tripUp, lineBadge, lineColor, lineText, lineName } from '../line.js';
+import { nextTrain, yourTrain, upcoming, arrivalAt, unconfirmedBefore, whereText, tripKey, gpsFresh, rowFor } from '../trains.js';
 import { trackedBus, nearbyStops } from '../buses.js';
 import { selectedItinerary, firstRide, isRide, legMinutes, legColor, legText, legName } from '../plan.js';
 import { fixText, busNumber, byRouteName, routeName } from '../api.js';
@@ -15,29 +15,47 @@ export function where(v) {
   return w.kind === 'at' ? `at <b>${esc(w.a)}</b>` : w.kind === 'between' ? `between <b>${esc(w.a)}</b> and <b>${esc(w.b)}</b>` : `near <b>${esc(w.a)}</b>`;
 }
 
+// a line's coloured square: 1, 2, T, N, S
+export const badge = route => route ? `<span class="lbadge" style="background:${lineColor(route)};color:${lineText(route)}">${esc(lineBadge(route))}</span>` : '';
+const lineList = ids => ids.map(lineName).filter(Boolean).join(' or ') || 'train';
+// the far end of a line in the direction you're riding
+const endOf = route => { const L = lineOf(route); return L?.stations.length ? (tripUp() ? L.stations.at(-1) : L.stations[0]).name : ''; };
+
+// no single train goes there: say where to change
+function transferCard() {
+  const xf = transferFor();
+  if (!xf) return `<div class="xfer">No train line connects <b>${esc(S.from)}</b> and <b>${esc(S.to)}</b>.<div class="acts"><button type="button" class="pri" data-act="dirs">Get directions</button></div></div>`;
+  const L2 = lineOf(xf.second), i = stationIdx(xf.station, L2), j = stationIdx(S.to, L2);
+  const toward = L2 && i >= 0 && j >= 0 ? (j > i ? L2.stations.at(-1) : L2.stations[0]).name : '';
+  return `<div class="xfer">Change trains at <b>${esc(xf.station)}</b>: take the ${badge(xf.second)}<b>${esc(lineName(xf.second))}</b>${toward ? ' toward ' + esc(toward) : ''} to <b>${esc(S.to)}</b>.</div>`;
+}
+
 /* ---------------- trains ---------------- */
 export function trainsView() {
   if (S.selected && S.trains[S.selected]) return trainDetail(S.trains[S.selected]);
   let html = '';
   const n = nextTrain(), y = yourTrain();
   if (S.line && !hasTrip()) html = P.intro('Choose your stations', 'Pick where you start and where you are going below.');
+  else if (S.line && !canRide()) html = '<div class="drag-zone">' + transferCard() + '</div>';
   else if (!S.line || S.arr?.key !== tripKey()) html = '<div class="drag-zone">' + P.skeleton(2, 50) + '</div>';
-  else if (!n) html = '<div class="drag-zone">' + P.empty(`No 2 Line trains from ${esc(S.from)} toward ${esc(S.to)} in the next 2 hours.`) + '</div>';
+  else if (!n) html = '<div class="drag-zone">' + P.empty(`No ${esc(lineList(tripLines()))} trains from ${esc(S.from)} toward ${esc(rideTo())} in the next 2 hours.`) + '</div>';
   else {
     const arrive = arrivalAt(n);
     let wh;
     const fresh = gpsFresh(y?.v);
     if (y?.v.cur) {
       const w = where(y.v);
-      wh = y.prior ? (w.startsWith('at ') ? `Your train is ${w}, getting ready to leave` : `Your train is finishing another trip, now ${w}`)
+      const atYours = whereText(y.v)?.kind === 'at' && whereText(y.v).a === S.from;   // waiting at your station to start your trip
+      wh = y.prior ? (atYours ? `Your train is ${w}, getting ready to leave` : `Your train is finishing another trip, now ${w}`)
         : (fresh ? 'Your train is ' : 'Estimated: your train is ') + w + (n.stopsAway > 0 ? ' · ' + P.stopsAway(n.stopsAway) : '');
     } else if (y) wh = 'Finding your train on the map…';                  // known, just not placed yet (its track is loading)
     else wh = n.live ? "Your train hasn't started its trip yet." : 'No train is reporting for this trip yet. It may not come, so check back in a few minutes.';
     const ub = n.live ? unconfirmedBefore(n) : 0;
     if (ub) wh += `<br><small>${ub === 1 ? 'An earlier train is' : ub + ' earlier trains are'} on the timetable but not reporting, so it isn't counted.</small>`;
     html = `<div class="drag-zone"><div class="hero"><div class="count num${n.live ? ' live' : ''}">${P.countdown(n.t, true)}</div>` +
-      `<div class="hero-info"><div class="hero-title">To ${esc(S.to)}</div><div class="hero-sub">${P.chip(n.dev, n.live)} <span class="num">${clock(n.t)}${arrive ? ' → ' + clock(arrive) : ''}</span></div></div></div>` +
-      `<div class="where${fresh ? '' : ' est'}"><span class="pin"></span><span>${wh}</span>${y?.v.cur ? P.followBtn('follow', S.follow && !S.selected) : ''}</div></div>`;
+      `<div class="hero-info"><div class="hero-title">${badge(n.routeId)}To ${esc(rideTo())}</div><div class="hero-sub">${P.chip(n.dev, n.live)} <span class="num">${clock(n.t)}${arrive ? ' → ' + clock(arrive) : ''}</span></div></div></div>` +
+      `<div class="where${fresh ? '' : ' est'}"><span class="pin"></span><span>${wh}</span>${y?.v.cur ? P.followBtn('follow', S.follow && !S.selected) : ''}</div>` +
+      (transferFor() ? transferCard() : '') + '</div>';
   }
   html += alerts();
   html += P.section('Trip') + `<div class="trip-wrap"><div class="group trip">` +
@@ -46,12 +64,14 @@ export function trainsView() {
     `</div><button class="swap" type="button" data-act="swap" aria-label="Swap direction">${ICON.swap}</button></div>`;
   const rows = upcoming();
   if (rows.length > 1) {
-    const term = terminus().split(' ')[0].toLowerCase();
+    const several = tripLines().length > 1;
     html += P.section('Departures', `<span class="plain">${esc(S.from)}</span>`) + '<div class="group">' + rows.slice(0, 7).map(x => {
       const ar = arrivalAt(x);
+      // a train that stops short of its line's end says where it goes
+      const term = endOf(x.routeId).split(' ')[0].toLowerCase();
       const shortTurn = x.headsign && term && !x.headsign.toLowerCase().includes(term) ? `<span class="to-tag">To ${esc(x.headsign)}</span>` : '';
       return `<div class="dep${x.canceled ? ' canceled' : ''}" data-key="${esc(x.tripId)}">${P.timeRow(x.t, ar ? 'Arrives ' + clock(ar) : '')}` +
-        `<div class="m">${P.chip(x.dev, x.live, x.canceled)}${shortTurn}</div><div class="mins num">${x.canceled ? '–' : P.countdown(x.t)}</div></div>`;
+        `<div class="m">${several ? badge(x.routeId) : ''}${P.chip(x.dev, x.live, x.canceled)}${shortTurn}</div><div class="mins num">${x.canceled ? '–' : P.countdown(x.t)}</div></div>`;
     }).join('') + '</div>';
   }
   return html + P.foot("Live positions from Sound Transit. Trains glide along the track between updates using each train's GPS and the timetable. Tap any train for its next stops.");
@@ -69,16 +89,17 @@ function trainDetail(v) {
   const fresh = gpsFresh(v);
   const sub = fresh ? 'Live GPS' + (v.gpsAt ? ` · updated <span data-ago="${v.gpsAt}"></span>` : '')
     : v.predicted && v.gpsAt ? `Estimated · last GPS <span data-ago="${v.gpsAt}"></span>` : 'Estimated from the timetable';
-  let html = P.header('<div class="d-badge">2</div>', 'To ' + (v.headsign || ''), sub, 'close', 'Close',
+  const L = lineOf(v.route) || S.line;
+  let html = P.header(`<div class="d-badge line" style="background:${lineColor(v.route)};color:${lineText(v.route)}">${esc(lineBadge(v.route) || '?')}</div>`, 'To ' + (v.headsign || ''), sub, 'close', 'Close',
     `<div class="where${fresh ? '' : ' est'}"><span class="pin"></span><span>${P.chip(v.dev, v.predicted)} ${fresh ? 'Now' : 'About'} ${where(v)}</span>${P.followBtn('follow', S.follow)}</div>`);
   html += P.section('Next stops');
   if (!tt) return html + `<div class="group">${P.empty("Loading this train's stops…")}</div>`;
-  const tau = (now() - tt.sd) / 1000 - v.dev, a = stationIdx(S.from), b = stationIdx(S.to);
+  const tau = (now() - tt.sd) / 1000 - v.dev, a = stationIdx(S.from, L), b = stationIdx(S.to, L);
   // use the same time the Departures list shows for your station, and shift the other stops with it
-  const row = rowFor(v.tripId), atA = tt.st.find(x => stationOfStop(x.id) === a);
+  const row = rowFor(v.tripId), atA = a >= 0 ? tt.st.find(x => stationOfStop(x.id, L) === a) : null;
   const shift = row && atA ? Math.max(-300000, Math.min(300000, row.t - (tt.sd + (atA.d + v.dev) * 1000))) : 0;
   const rows = tt.st.filter(x => x.a + 20 >= tau).map(x => {
-    const k = stationOfStop(x.id), name = k >= 0 ? S.line.stations[k].name : (S.stopInfo[x.id]?.name || 'Stop');
+    const k = stationOfStop(x.id, L), name = k >= 0 ? L.stations[k].name : (S.stopInfo[x.id]?.name || 'Stop');
     const eta = x === atA && row ? row.t : tt.sd + (x.a + v.dev) * 1000 + shift;
     return `<div class="cell${k === a || k === b ? ' mine' : ''}" data-key="${esc(x.id)}"><span class="tl"></span><span class="v">${esc(name)}</span><span class="r num">${P.countdown(eta)} · ${clock(eta)}</span></div>`;
   }).join('');

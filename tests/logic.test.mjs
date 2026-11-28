@@ -6,7 +6,8 @@ import assert from 'node:assert/strict';
 
 const { S } = await import('../js/state.js');
 const { parseDeparture, busNumber, passedStop, vehicleFrom, departures, indexRefs } = await import('../js/api.js');
-const { mainShape } = await import('../js/line.js');
+const LN = await import('../js/line.js');
+const { mainShape } = LN;
 const T = await import('../js/trains.js');
 const { project } = await import('../js/util.js');
 
@@ -15,21 +16,23 @@ const names = ['A', 'B', 'C', 'D', 'E'], lat = i => 47.60 + i * 0.025, LON = -12
 function setLine() {
   const stations = names.map((name, i) => ({ name, up: 'U' + i, down: 'D' + i, lat: lat(i), lon: LON }));
   const stopIdx = {}; stations.forEach((s, i) => { stopIdx[s.up] = i; stopIdx[s.down] = i; });
-  S.line = { stations, stopIdx, shapes: { UP: { pts: Array.from({ length: 41 }, (_, k) => [47.60 + k * 0.0025, LON]) } }, shapeUp: 'UP', shapeDown: 'UP', dirUp: '1', dirDown: '0' };
+  S.shapes = { UP: { pts: Array.from({ length: 41 }, (_, k) => [47.60 + k * 0.0025, LON]) } };
+  S.line = { route: 'R1', name: '1 Line', stations, stopIdx, shapes: {}, shapeUp: 'UP', shapeDown: 'UP', dirUp: '1', dirDown: '0' };
+  S.lines = { R1: S.line }; S.lineOrder = ['R1'];
   stations.forEach(s => { s.s = project(mainShape(), s).s; });
 }
 const NOW = Date.now();
 // a timetable for a northbound trip starting at A at `start` (ms), 3 minutes between stations
 function timetable(id, start, next = null) {
   const sd = start - (start % 86400000);
-  S.trips[id] = { sd, next, shapeId: 'UP', dirId: '1', st: names.map((n, i) => ({ id: 'U' + i, a: (start - sd) / 1000 + i * 180, d: (start - sd) / 1000 + i * 180 + 20, s: i * 2780 })) };
+  S.trips[id] = { sd, next, route: 'R1', shapeId: 'UP', dirId: '1', st: names.map((n, i) => ({ id: 'U' + i, a: (start - sd) / 1000 + i * 180, d: (start - sd) / 1000 + i * 180 + 20, s: i * 2780 })) };
 }
 function reset() {
   setLine(); S.from = 'B'; S.to = 'D'; S.trips = {}; S.trains = {}; S.clockOffset = 0;
   S.arr = { key: T.tripKey(), at: NOW, list: [] };
 }
-const row = (o) => ({ tripId: 'X', routeId: '40_2LINE', t: NOW + 5 * 60000, sched: NOW + 5 * 60000, live: true, dev: 0, dirId: '1', canceled: false, dup: false, departs: true, blockLive: false, stopsAway: 2, distFromStop: 4000, gps: true, ...o });
-const train = (tripId, atLat, o = {}) => ({ tripId, dirId: '1', predicted: true, gps: { lat: atLat, lon: LON }, gpsAt: NOW - 20000, cur: { lat: atLat, lon: LON }, ...o });
+const row = (o) => ({ tripId: 'X', routeId: 'R1', t: NOW + 5 * 60000, sched: NOW + 5 * 60000, live: true, dev: 0, dirId: '1', canceled: false, dup: false, departs: true, blockLive: false, stopsAway: 2, distFromStop: 4000, gps: true, ...o });
+const train = (tripId, atLat, o = {}) => ({ tripId, route: 'R1', dirId: '1', predicted: true, gps: { lat: atLat, lon: LON }, gpsAt: NOW - 20000, cur: { lat: atLat, lon: LON }, ...o });
 
 /* ---------- reading the feed ---------- */
 test('a timetable placeholder bus has no GPS and no fleet number', () => {
@@ -155,4 +158,49 @@ test('GPS older than 3 minutes is treated as an estimate', () => {
   assert.equal(T.gpsFresh(train('a', 47.6, { gpsAt: NOW - 60000 })), true);
   assert.equal(T.gpsFresh(train('a', 47.6, { gpsAt: NOW - 4 * 60000 })), false);
   assert.equal(T.gpsFresh(train('a', 47.6, { predicted: false })), false);
+});
+
+/* ---------- several lines ---------- */
+// a second line sharing B..E with the first, branching off east from B: B, X, Y
+function addBranch() {
+  const st = [['Y', 47.62, -122.20], ['X', 47.623, -122.25], ['B', lat(1), LON], ['C', lat(2), LON], ['D', lat(3), LON], ['E', lat(4), LON]]
+    .map(([name, la, lo], i) => ({ name, lat: la, lon: lo, up: i < 2 ? 'V' + i : 'U' + (i - 1), down: i < 2 ? 'W' + i : 'D' + (i - 1) }));
+  const stopIdx = {}; st.forEach((s, i) => { stopIdx[s.up] = i; stopIdx[s.down] = i; });
+  S.shapes.UP2 = { pts: st.map(s => [s.lat, s.lon]) };
+  S.lines.R2 = { route: 'R2', name: '2 Line', stations: st, stopIdx, shapes: {}, shapeUp: 'UP2', shapeDown: 'UP2', dirUp: '0', dirDown: '1' };
+  S.lineOrder = ['R1', 'R2'];
+  st.forEach(s => { s.s = project(mainShape(S.lines.R2), s).s; });
+}
+
+test('where two lines share track, a trip can take either', () => {
+  reset(); addBranch();
+  S.from = 'B'; S.to = 'D';
+  assert.deepEqual(LN.tripLines(), ['R1', 'R2']);
+  assert.equal(LN.transferFor(), null);
+  assert.equal(LN.rideTo(), 'D');
+});
+
+test('a trip with no single line says where to change trains', () => {
+  reset(); addBranch();
+  S.from = 'A'; S.to = 'X';                        // A is only on R1, X only on R2: change at B
+  assert.deepEqual(LN.directLines(), []);
+  const xf = LN.transferFor();
+  assert.equal(xf.station, 'B'); assert.equal(xf.first, 'R1'); assert.equal(xf.second, 'R2');
+  assert.equal(LN.rideTo(), 'B');                  // the countdown is for the first train, to B
+  assert.deepEqual(LN.tripLines(), ['R1']);
+});
+
+test("each line keeps its own direction ids", () => {
+  reset(); addBranch();
+  assert.equal(LN.isUp('1', 'R1'), true);
+  assert.equal(LN.isUp('1', 'R2'), false);         // on R2, '0' is northbound
+  assert.equal(LN.isUp('0', 'R2'), true);
+});
+
+test('every station is listed once, with all the lines that stop there', () => {
+  reset(); addBranch();
+  const all = LN.allStations(), b = all.find(s => s.name === 'B');
+  assert.equal(all.length, 7);
+  assert.deepEqual(b.lines, ['R1', 'R2']);
+  assert.equal(LN.lineBadge('R2'), '2');
 });

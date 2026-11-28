@@ -19,7 +19,7 @@
 <link rel="preconnect" href="https://api.pugetsound.onebusaway.org">
 <link rel="preconnect" href="https://tiles.openfreemap.org">
 <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
-<link rel="stylesheet" href="css/app.css?v=4.3.3">
+<link rel="stylesheet" href="css/app.css?v=4.4.0">
 <!-- fetch every module at once instead of one import at a time -->
 <link rel="modulepreload" href="js/config.js">
 <link rel="modulepreload" href="js/util.js">
@@ -71,9 +71,10 @@
 </div>
 
 <section class="lineview off" id="lineView" aria-hidden="true">
-  <h1>2 Line</h1>
+  <h1 id="lvTitle">Trains</h1>
   <div class="lead" id="lvLead">Every train, live</div>
-  <div class="lv-head"><div>↓ Redmond</div><div>Station</div><div>Lynnwood ↑</div></div>
+  <div class="line-tabs" id="lineTabs" role="group" aria-label="Choose a line"></div>
+  <div class="lv-head"><div id="lvDown">↓ South</div><div>Station</div><div id="lvUp">North ↑</div></div>
   <div class="diagram" id="diagram"></div>
   <p class="foot">Trains move along the line between updates using Sound Transit's timetable and live delays. A dashed train isn't sending GPS right now, so its position is estimated.</p>
 </section>
@@ -140,6 +141,6 @@
 <div class="hint glass hidden" id="hint">Zoom in to see bus stops</div>
 
 <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
-<script type="module" src="js/main.js?v=4.3.3"></script>
+<script type="module" src="js/main.js?v=4.4.0"></script>
 </body>
 </html>

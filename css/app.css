@@ -145,7 +145,7 @@ details.alert p{margin:8px 0 0;color:var(--label);white-space:pre-line;font-size
 .srow small{font-size:11px;color:var(--blue);font-weight:700;text-transform:uppercase;letter-spacing:.3px}
 .sdot{position:absolute;width:12px;height:12px;margin:-6px 0 0 -6px;border-radius:50%;background:var(--card);border:3px solid var(--lineDim);box-sizing:border-box}
 .sdot.mine{border-color:var(--line)}
-.lt{position:absolute;left:0;top:0;padding:0;width:26px;height:26px;margin:-13px 0 0 -13px;border-radius:50%;background:var(--line);border:2.5px solid #fff;box-shadow:0 1px 5px rgba(0,0,0,.3);color:#fff;font:700 10px/21px -apple-system,system-ui,sans-serif;text-align:center;will-change:transform;cursor:pointer}
+.lt{position:absolute;left:0;top:0;padding:0;width:26px;height:26px;margin:-13px 0 0 -13px;border-radius:50%;background:var(--tc,var(--line));border:2.5px solid #fff;box-shadow:0 1px 5px rgba(0,0,0,.3);color:#fff;font:700 10px/21px -apple-system,system-ui,sans-serif;text-align:center;will-change:transform;cursor:pointer}
 .lt.nogps{background:var(--card);color:var(--label2);border:2px dashed var(--label2)}
 .lt.you{background:var(--blue);width:32px;height:32px;margin:-16px 0 0 -16px;line-height:27px;font-size:12px;box-shadow:0 0 0 4px rgba(10,132,255,.3)}
 
@@ -337,3 +337,22 @@ html[data-font="legible"]{--font:"Atkinson Hyperlegible",-apple-system,system-ui
 /* the API key is hidden as dots unless you tap Show, so a screenshot of Settings can't leak it */
 .field.masked{-webkit-text-security:disc;text-security:disc}
 .key-show{flex:none;height:30px;padding:0 12px;border-radius:15px;background:var(--fill);color:var(--blue);font-size:14px;font-weight:600}
+/* ---------- several train lines ---------- */
+.st-icos{flex:none;display:flex;gap:3px;min-width:30px}
+.st-icos .st-ico{width:22px;height:22px;border-radius:5px;font-size:12px}
+.st-icos .st-ico:only-child{width:30px;height:30px;border-radius:8px;font-size:13px}
+.sec-sub{text-transform:none;letter-spacing:0;color:var(--label3);margin-left:6px;font-size:12px}
+.lbadge{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 4px;border-radius:5px;font-size:12px;font-weight:700;margin-right:6px;vertical-align:1px;font-family:var(--round)}
+.d-badge.line{border-radius:10px}
+.xfer{margin:12px 16px;padding:14px 16px;border-radius:14px;background:var(--card);line-height:1.4}
+.xfer b{font-weight:650}
+.xfer .acts{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+.xfer .acts button{height:36px;padding:0 14px;border-radius:18px;background:var(--fill);color:var(--blue);font-weight:600;font-size:15px}
+.xfer .acts button.pri{background:var(--blue);color:#fff}
+.line-tabs{display:flex;gap:8px;overflow-x:auto;padding:2px 16px 10px;scrollbar-width:none}
+.line-tabs::-webkit-scrollbar{display:none}
+.line-tabs button{flex:none;display:flex;align-items:center;gap:6px;height:34px;padding:0 12px 0 6px;border-radius:17px;background:var(--fill);font-weight:600;font-size:14px}
+.line-tabs button[aria-pressed="true"]{background:var(--label);color:var(--bg)}
+.line-tabs .lbadge{margin:0}
+.lt.other-line{opacity:.82}
+.lineview .line-tabs{padding:0 0 12px}

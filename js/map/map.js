@@ -3,7 +3,7 @@
    behind and feel sticky. Layers only re-upload when something moved at least half a pixel. */
 import { CFG, COLORS } from '../config.js';
 import { S, emit, on } from '../state.js';
-import { stationIdx, mainShape, hasTrip } from '../line.js';
+import { stationIdx, mainShape, hasTrip, rideTo, tripLines, transferFor, allStations, lineColor, lineText, lineBadge } from '../line.js';
 import { fleet, knownShape } from '../fleet.js';
 import { selectedItinerary, isRide, legColor, legPath } from '../plan.js';
 import * as icon from './icons.js';
@@ -13,7 +13,7 @@ export let map = null;
 let ready = false, meMarker = null, waitMarker = null, layerClick = false;
 
 const styleUrl = () => isDark() ? CFG.styleDark : CFG.styleLight;
-const TRAIN_LAYERS = ['lt-tr-ring', 'lt-tr-sel', 'lt-tr-arr', 'lt-tr', 'lt-tr-tag'];
+const TRAIN_LAYERS = ['lt-tr-ring', 'lt-tr-sel', 'lt-tr', 'lt-tr-badge', 'lt-tr-tag'];
 const LINE_LAYERS = ['lt-route-case', 'lt-route', 'lt-trip', 'lt-st', 'lt-st-label', 'lt-st-label-end'];
 const BUS_LAYERS = ['lt-vroute-case', 'lt-vroute', 'lt-veh-sel', 'lt-veh', 'lt-veh-lbl'];
 const STOP_LAYERS = ['lt-bus-sel', 'lt-bus', 'lt-bus-label'];
@@ -32,7 +32,7 @@ function clickable(id, fn) {
 /* ---------- start ---------- */
 export function initMap() {
   if (!window.maplibregl || (maplibregl.supported && !maplibregl.supported())) throw new Error('no webgl');
-  const L = S.line, a = stationIdx(S.from), b = stationIdx(S.to);
+  const L = S.line, a = stationIdx(S.from), b = stationIdx(rideTo());
   map = new maplibregl.Map({
     container: 'map', style: styleUrl(), attributionControl: { compact: true },
     bounds: L && a >= 0 && b >= 0 ? bounds([L.stations[a], L.stations[b]]) : [[-122.33, 47.6], [-122.1, 47.83]], fitBoundsOptions: { padding: 40 },
@@ -48,6 +48,7 @@ export function initMap() {
   map.on('moveend', () => emit('mapMoved'));
   map.on('click', e => { if (layerClick) { layerClick = false; return; } if (!e.originalEvent?.target?.closest?.('.maplibregl-marker')) emit('mapTap'); });
   clickable('lt-tr', p => emit('trainTap', p.id));
+  clickable('lt-tr-badge', p => emit('trainTap', p.id));
   clickable('lt-veh', p => emit('busTap', { id: p.id, group: p.g }));
   clickable('lt-bus', p => emit('stopTap', p.id));
   const restyle = () => { ready = false; map.setStyle(styleUrl(), { diff: false }); };
@@ -91,18 +92,44 @@ export function applyMode() {
   trainSig = ''; busSig = '';
 }
 
-/* ---------- the 2 Line ---------- */
-function tripLine() {
-  const L = S.line, sh = mainShape();
-  if (!sh || !hasTrip()) return lineFeature([]);
-  const sa = L.stations[stationIdx(S.from)].s, sb = L.stations[stationIdx(S.to)].s, s0 = Math.min(sa, sb), s1 = Math.max(sa, sb);
+/* ---------- the train lines ---------- */
+// the part of line L between two stations
+function segment(L, x, y) {
+  const sh = mainShape(L), i = stationIdx(x, L), j = stationIdx(y, L);
+  if (!sh || i < 0 || j < 0) return null;
+  const sa = L.stations[i].s, sb = L.stations[j].s, s0 = Math.min(sa, sb), s1 = Math.max(sa, sb);
   const p0 = pointAt(sh, s0), p1 = pointAt(sh, s1);
-  return lineFeature([[p0.lat, p0.lon], ...sh.pts.filter((_, i) => sh.cum[i] > s0 && sh.cum[i] < s1), [p1.lat, p1.lon]]);
+  return [[p0.lat, p0.lon], ...sh.pts.filter((_, k) => sh.cum[k] > s0 && sh.cum[k] < s1), [p1.lat, p1.lon]];
+}
+// every line, in its colour; the lines you can ride drawn a little stronger
+function allLines() {
+  const mine = new Set(tripLines()), xf = transferFor();
+  if (xf) mine.add(xf.second);
+  return collection(S.lineOrder.slice().reverse().map(id => {
+    const sh = mainShape(S.lines[id]); if (!sh) return null;
+    return lineFeature(sh.pts, { c: lineColor(id), mine: mine.has(id) ? 1 : 0 });
+  }).filter(Boolean));
+}
+// your trip: the ride, and after a change of trains the second ride, each in its line's colour
+function tripLine() {
+  if (!hasTrip() || !S.line) return collection();
+  const legs = [], first = segment(S.line, S.from, rideTo());
+  if (first) legs.push({ pts: first, c: lineColor(S.line.route) });
+  const xf = transferFor();
+  if (xf) { const L = S.lines[xf.second], second = L && segment(L, xf.station, S.to); if (second) legs.push({ pts: second, c: lineColor(xf.second) }); }
+  return collection(legs.map(l => lineFeature(l.pts, { c: l.c })));
+}
+// which stations are on your trip
+function onTrip(name) {
+  if (!hasTrip()) return false;
+  const inLeg = (L, x, y) => { if (!L) return false; const i = stationIdx(x, L), j = stationIdx(y, L), k = stationIdx(name, L); return i >= 0 && j >= 0 && k >= Math.min(i, j) && k <= Math.max(i, j); };
+  const xf = transferFor();
+  return inLeg(S.line, S.from, rideTo()) || (!!xf && inLeg(S.lines[xf.second], xf.station, S.to));
 }
 function stationPoints() {
-  const L = S.line; if (!L) return collection();
-  const a = stationIdx(S.from), b = stationIdx(S.to), lo = Math.min(a, b), hi = Math.max(a, b);
-  return collection(L.stations.map((st, i) => pointFeature(st, { name: st.name, end: i === a || i === b ? 1 : 0, mine: a >= 0 && i >= lo && i <= hi ? 1 : 0 })));
+  if (!S.lineOrder.length) return collection();
+  const ends = new Set(hasTrip() ? [S.from, S.to, rideTo()] : []);
+  return collection(allStations().map(st => pointFeature(st, { name: st.name, c: lineColor(st.lines[0]), end: ends.has(st.name) ? 1 : 0, mine: onTrip(st.name) ? 1 : 0 })));
 }
 function meCircle() {
   if (!S.me) return collection();
@@ -112,19 +139,19 @@ function meCircle() {
 }
 function addLineLayers() {
   const line = cssVar('--line') || '#007CAD', dark = isDark(), text = dark ? '#F2F2F7' : '#1C1C1E', halo = dark ? '#000000' : '#FFFFFF', font = ['Noto Sans Regular'];
-  source('lt-route', lineFeature(mainShape()?.pts || []));
+  source('lt-route', allLines());
   source('lt-trip', tripLine());
   source('lt-stations', stationPoints());
   source('lt-me', meCircle());
   const round = { 'line-cap': 'round', 'line-join': 'round' }, w = (a, b) => ['interpolate', ['linear'], ['zoom'], 9, a, 15, b];
   layer({ id: 'lt-me-acc', type: 'fill', source: 'lt-me', paint: { 'fill-color': '#0A84FF', 'fill-opacity': 0.12 } });
   layer({ id: 'lt-route-case', type: 'line', source: 'lt-route', layout: round, paint: { 'line-color': halo, 'line-width': w(5, 11), 'line-opacity': 0.85 } });
-  layer({ id: 'lt-route', type: 'line', source: 'lt-route', layout: round, paint: { 'line-color': line, 'line-width': w(2.5, 6), 'line-opacity': 0.45 } });
-  layer({ id: 'lt-trip', type: 'line', source: 'lt-trip', layout: round, paint: { 'line-color': line, 'line-width': w(4, 8) } });
+  layer({ id: 'lt-route', type: 'line', source: 'lt-route', layout: round, paint: { 'line-color': ['get', 'c'], 'line-width': w(2.5, 6), 'line-opacity': ['case', ['==', ['get', 'mine'], 1], 0.55, 0.38] } });
+  layer({ id: 'lt-trip', type: 'line', source: 'lt-trip', layout: round, paint: { 'line-color': ['get', 'c'], 'line-width': w(4, 8) } });
   const end = (a, b) => ['case', ['==', ['get', 'end'], 1], a, b];
   layer({ id: 'lt-st', type: 'circle', source: 'lt-stations', paint: {
-    'circle-radius': ['interpolate', ['linear'], ['zoom'], 9, end(5, 2.5), 15, end(8, 5.5)], 'circle-color': end(line, halo),
-    'circle-stroke-color': end(halo, ['case', ['==', ['get', 'mine'], 1], line, cssVar('--label3') || '#999']), 'circle-stroke-width': end(3, 2) } });
+    'circle-radius': ['interpolate', ['linear'], ['zoom'], 9, end(5, 2.5), 15, end(8, 5.5)], 'circle-color': end(['get', 'c'], halo),
+    'circle-stroke-color': end(halo, ['case', ['==', ['get', 'mine'], 1], ['get', 'c'], cssVar('--label3') || '#999']), 'circle-stroke-width': end(3, 2) } });
   layer({ id: 'lt-st-label', type: 'symbol', source: 'lt-stations', minzoom: 11, filter: ['==', ['get', 'end'], 0],
     layout: { 'text-field': ['get', 'name'], 'text-font': font, 'text-size': 12, 'text-anchor': 'left', 'text-offset': [0.9, 0], 'text-optional': true, 'symbol-sort-key': ['-', 1, ['get', 'mine']] },
     paint: { 'text-color': text, 'text-opacity': ['case', ['==', ['get', 'mine'], 1], 1, 0.6], 'text-halo-color': halo, 'text-halo-width': 1.6 } });
@@ -134,7 +161,7 @@ function addLineLayers() {
 }
 export function refreshLine() {
   if (!mapReady() || !S.line) return;
-  source('lt-route', lineFeature(mainShape()?.pts || []));
+  source('lt-route', allLines());
   source('lt-trip', tripLine());
   source('lt-stations', stationPoints());
 }
@@ -142,15 +169,29 @@ export function refreshLine() {
 /* ---------- trains ---------- */
 let trainSig = '', tagText = '';
 function addTrainLayers() {
-  for (const k of ['live', 'other', 'nogps', 'you']) { image('tr-' + k, icon.trainBadge(k)); image('tra-' + k, icon.trainArrow(k)); }
+  trainImgs.clear();
   tagText = ''; setTag('Your train');
   source('lt-trains', collection());
   const blue = cssVar('--blue') || '#0A84FF', over = { 'icon-allow-overlap': true, 'icon-ignore-placement': true };
-  layer({ id: 'lt-tr-ring', type: 'circle', source: 'lt-trains', filter: ['==', ['get', 'you'], 1], paint: { 'circle-radius': 26, 'circle-color': blue, 'circle-opacity': 0.14, 'circle-stroke-color': blue, 'circle-stroke-width': 1.5, 'circle-stroke-opacity': 0.5, 'circle-pitch-alignment': 'map' } });
+  layer({ id: 'lt-tr-ring', type: 'circle', source: 'lt-trains', filter: ['==', ['get', 'you'], 1], paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 9, 15, 14, 26, 18, 52], 'circle-color': blue, 'circle-opacity': 0.14, 'circle-stroke-color': blue, 'circle-stroke-width': 1.5, 'circle-stroke-opacity': 0.5, 'circle-pitch-alignment': 'map' } });
   layer({ id: 'lt-tr-sel', type: 'circle', source: 'lt-trains', filter: ['==', ['get', 'sel'], 1], paint: { 'circle-radius': 17, 'circle-color': 'rgba(10,132,255,.45)' } });
-  layer({ id: 'lt-tr-arr', type: 'symbol', source: 'lt-trains', layout: { 'icon-image': ['concat', 'tra-', ['get', 'k']], 'icon-rotate': ['get', 'h'], 'icon-rotation-alignment': 'map', ...over, 'symbol-sort-key': ['get', 'z'] } });
-  layer({ id: 'lt-tr', type: 'symbol', source: 'lt-trains', layout: { 'icon-image': ['concat', 'tr-', ['get', 'k']], ...over, 'symbol-sort-key': ['get', 'z'], 'symbol-z-order': 'source' } });
+  // the train itself, lying along the track and turning with it (like the buses); its line's badge on top, always upright
+  layer({ id: 'lt-tr', type: 'symbol', source: 'lt-trains', layout: { 'icon-image': ['get', 'ib'], 'icon-rotate': ['get', 'h'], 'icon-rotation-alignment': 'map', 'icon-pitch-alignment': 'map',
+    'icon-size': ['interpolate', ['exponential', 1.5], ['zoom'], 9, 0.32, 12, 0.5, 14, 0.75, 16, 1.05, 18, 1.6], ...over, 'symbol-sort-key': ['get', 'z'], 'symbol-z-order': 'source' } });
+  layer({ id: 'lt-tr-badge', type: 'symbol', source: 'lt-trains', layout: { 'icon-image': ['get', 'ic'],
+    'icon-size': ['interpolate', ['linear'], ['zoom'], 9, 0.75, 13, 0.9, 16, 1], ...over, 'symbol-sort-key': ['get', 'z'], 'symbol-z-order': 'source' } });
   layer({ id: 'lt-tr-tag', type: 'symbol', source: 'lt-trains', filter: ['==', ['get', 'you'], 1], layout: { 'icon-image': 'tr-tag', 'icon-anchor': 'bottom', 'icon-offset': [0, -23], ...over } });
+}
+// train pictures: one per line and kind ('you', 'live', 'other', 'nogps'), drawn the first time they're needed
+const trainImgs = new Set();
+function trainImages(route, kind) {
+  const key = lineBadge(route) + '-' + kind;
+  if (!trainImgs.has(key)) {
+    trainImgs.add(key);
+    image('tr-' + key, icon.trainTop(kind, lineColor(route)));
+    image('trb-' + key, icon.trainBadge(kind, lineBadge(route), lineColor(route), lineText(route), 20));
+  }
+  return key;
 }
 function setTag(text) { if (text !== tagText) { tagText = text; image('tr-tag', icon.tag(text)); } }
 
@@ -161,12 +202,14 @@ const grid = () => 2 * 512 * 2 ** map.getZoom() / 360;
 export function drawTrains(items, tag) {
   if (!mapReady() || S.mode !== 'trains' || S.view !== 'map') return;
   setTag(tag);
-  const g = grid(), sig = items.map(x => x.id + x.kind + x.sel + Math.round(x.p.lon * g) + ',' + Math.round(x.p.lat * g) + ',' + Math.round(x.p.heading / 3)).join('|');
+  const g = grid(), sig = items.map(x => x.id + x.kind + x.route + x.sel + Math.round(x.p.lon * g) + ',' + Math.round(x.p.lat * g) + ',' + Math.round(x.p.heading / 3)).join('|');
   if (sig === trainSig) return;
   trainSig = sig;
   const z = x => x.you ? 3 : x.sel ? 2 : x.kind === 'other' ? 0 : 1;
-  map.getSource('lt-trains')?.setData(collection(items.slice().sort((a, b) => z(a) - z(b)).map(x =>
-    pointFeature(x.p, { id: x.id, k: x.kind, h: Math.round(x.p.heading), you: x.you ? 1 : 0, sel: x.sel ? 1 : 0, z: z(x) }))));
+  map.getSource('lt-trains')?.setData(collection(items.slice().sort((a, b) => z(a) - z(b)).map(x => {
+    const key = trainImages(x.route, x.kind);
+    return pointFeature(x.p, { id: x.id, ib: 'tr-' + key, ic: 'trb-' + key, h: Math.round(x.p.heading), you: x.you ? 1 : 0, sel: x.sel ? 1 : 0, z: z(x) });
+  })));
 }
 
 /* ---------- buses on the map ---------- */
@@ -290,7 +333,9 @@ export function fitTo(points, maxZoom = 14.5) {
 }
 export function fitTrip(extra = []) {
   if (!map || !hasTrip()) return;
-  fitTo([S.line.stations[stationIdx(S.from)], S.line.stations[stationIdx(S.to)], ...extra]);
+  // both ends of your trip, and where you change trains
+  const all = allStations(), pts = [S.from, rideTo(), S.to].map(n => all.find(s => s.name === n)).filter(Boolean);
+  if (pts.length) fitTo([...pts, ...extra]);
 }
 export function flyTo(p, zoom, duration = 600) { if (map && p) map.easeTo({ center: [p.lon, p.lat], zoom: zoom ?? map.getZoom(), duration }); }
 export const center = () => map ? { lat: map.getCenter().lat, lon: map.getCenter().lng } : null;

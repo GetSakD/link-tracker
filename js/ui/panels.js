@@ -1,7 +1,7 @@
 /* The full-screen panels (station picker, directions, settings), the toast and the status pill. */
 import { ICON } from '../config.js';
 import { S, now, emit } from '../state.js';
-import { stationMatches, nearestStation } from '../line.js';
+import { stationMatches, nearestStation, allStations, chooseLine, lineColor, lineText, lineBadge } from '../line.js';
 import * as P from './parts.js';
 import { $, $$, esc, miles, dist, store } from '../util.js';
 import { morph } from './dom.js';
@@ -64,19 +64,36 @@ export function openPicker(which, firstRun = false) {
   openPanel('#picker');
 }
 export function closePicker() { if (pick?.firstRun) S.pickDismissed = true; pick = null; closePanel('#picker'); }
+// small coloured squares for the lines that stop at a station
+export const lineChips = ids => `<span class="st-icos" aria-hidden="true">${ids.map(id =>
+  `<span class="st-ico" style="background:${lineColor(id)};color:${lineText(id)}">${esc(lineBadge(id))}</span>`).join('')}</span>`;
+
 export function renderPicker() {
   if (!pick) return;
-  const L = S.line, list = $('#pickList'), q = $('#pickSearch').value.trim();
-  if (!L) { morph(list, P.empty('Loading stations…')); return; }
-  const cur = pick.which === 'from' ? S.from : S.to, near = nearestStation(S.me);
+  const list = $('#pickList'), q = $('#pickSearch').value.trim();
+  if (!S.line) { morph(list, P.empty('Loading stations…')); return; }
+  const cur = pick.which === 'from' ? S.from : S.to, near = nearestStation(S.me), all = allStations();
+  const nearSt = all.find(s => s.name === near);
   let html = '';
   if (!q && 'geolocation' in navigator) html += P.section('&nbsp;') + '<div class="group">' + P.cell({ attrs: 'data-near="1"', ico: `<span class="loc-ico">${ICON.locate}</span>`,
-    text: near >= 0 ? 'Nearest: ' + esc(L.stations[near].name) : 'Use Current Location', color: 'var(--blue)', right: near >= 0 ? `<span class="r">${miles(dist(L.stations[near], S.me))}</span>` : '' }) + '</div>';
-  const rows = L.stations.map((st, i) => ({ st, i })).reverse().filter(o => !q || stationMatches(o.st.name, q));
-  html += P.section('2 Line stations') + '<div class="group">' + rows.map(({ st, i }) => P.cell({ attrs: `data-st="${esc(st.name)}" data-key="${esc(st.name)}"`, cls: 'ind-40',
-    ico: '<span class="st-ico" aria-hidden="true">2</span>', text: esc(st.name) + (i === near ? ' <span class="near">Nearest</span>' : ''),
-    right: (S.me ? `<span class="r num">${miles(dist(st, S.me))}</span>` : '') + (st.name === cur ? '<span class="check">✓</span>' : '') })).join('') +
-    (rows.length ? '' : P.empty(`No station matches “${esc(q)}”.`)) + '</div>';
+    text: nearSt ? 'Nearest: ' + esc(nearSt.name) : 'Use Current Location', color: 'var(--blue)', right: nearSt ? `<span class="r">${miles(dist(nearSt, S.me))}</span>` : '' }) + '</div>';
+  const row = st => P.cell({ attrs: `data-st="${esc(st.name)}" data-key="${esc(st.name)}"`, cls: 'st-row',
+    ico: lineChips(st.lines), text: esc(st.name) + (st.name === near ? ' <span class="near">Nearest</span>' : ''),
+    right: (S.me ? `<span class="r num">${miles(dist(st, S.me))}</span>` : '') + (st.name === cur ? '<span class="check">✓</span>' : '') });
+  if (q) {
+    const hits = all.filter(st => stationMatches(st.name, q));
+    html += P.section('Stations') + '<div class="group">' + hits.map(row).join('') + (hits.length ? '' : P.empty(`No station matches “${esc(q)}”.`)) + '</div>';
+  } else {
+    // one section per line, north to south; a station shared with an earlier line is listed only once
+    const shown = new Set();
+    for (const id of S.lineOrder) {
+      const sts = S.lines[id].stations.slice().reverse().filter(st => !shown.has(st.name));
+      if (!sts.length) continue;
+      sts.forEach(st => shown.add(st.name));
+      const L = S.lines[id], label = esc(L.name) + (L.long ? ` <span class="sec-sub">${esc(L.long.replace(/\s*-\s*/g, ' – '))}</span>` : '');
+      html += P.section(label) + '<div class="group">' + sts.map(st => row(all.find(x => x.name === st.name))).join('') + '</div>';
+    }
+  }
   morph(list, html);
 }
 export function pickStation(name) {
@@ -85,6 +102,7 @@ export function pickStation(name) {
   if (name === other) [S.from, S.to] = [S.to, S.from];
   else S[which] = name;
   store.set('from', S.from); store.set('to', S.to);
+  chooseLine();
   closePicker();
   emit('tripChanged');
   if (firstRun && which === 'from' && !S.to) setTimeout(() => openPicker('to', true), 380);

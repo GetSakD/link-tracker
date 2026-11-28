@@ -1,4 +1,4 @@
-/* Link Tracker — live 2 Line trains and Puget Sound buses.
+/* Link Tracker — live Sound Transit trains (1 Line, 2 Line, T Line, Sounder) and Puget Sound buses.
    Data flows one way: refresh() pulls from the feeds into S → changed() → render() draws the panel,
    and one animation loop moves trains, buses and the camera every frame. */
 import { CFG } from './config.js';
@@ -6,7 +6,7 @@ import { S, now, on, emit, changed } from './state.js';
 import { addTask, wake } from './loop.js';
 import { initAppearance } from './ui/theme.js';
 import { oba } from './api.js';
-import { loadLine, restoreLine, stationIdx, hasTrip, nearestStation, tripUp, isUp } from './line.js';
+import { loadLines, restoreLines, forgetLines, chooseLine, stationLines, tripLines, hasTrip, nearestStation, tripUp, isUp } from './line.js';
 import { refreshTrains, loadDepartures, placeTrain, yourTrain, nextTrain, saveSnapshot, loadSnapshot, gpsFresh } from './trains.js';
 import { stopsAround, stopsInView, loadStopDepartures, showStopBuses, findBus, refreshTrackedBus, showTrackedBuses, stopTracking, trackedBus } from './buses.js';
 import { plan, trackPlanRides, showPlanBuses, firstRide } from './plan.js';
@@ -14,7 +14,7 @@ import { fleet, stepFleet } from './fleet.js';
 import * as M from './map/map.js';
 import { initSheet, setDetent, visibleHeight, isSide } from './ui/sheet.js';
 import { trainsView, busesView, planView } from './ui/views.js';
-import { buildDiagram, drawLine } from './ui/lineview.js';
+import { buildDiagram, drawLine, initLineTabs } from './ui/lineview.js';
 import { morph } from './ui/dom.js';
 import { tick } from './ui/parts.js';
 import { initPanels, openPicker, closePicker, renderPicker, pickStation, skipPicker, pickerOpen, openSettings, closePanel, toast, updateStatus } from './ui/panels.js';
@@ -47,9 +47,10 @@ async function refresh(manual) {
       if (S.track) await refreshTrackedBus(); else if (S.stop) await loadStopDepartures();
       ok(!S.track && !S.stop); return;
     }
-    const fresh = S.line ? null : await loadLine(false);
+    const fresh = S.line ? {} : await loadLines(false);
+    chooseLine();
     if (S.line && !hasTrip()) {
-      if (!S.pickDismissed && !pickerOpen()) openPicker(stationIdx(S.from) < 0 ? 'from' : 'to', true);
+      if (!S.pickDismissed && !pickerOpen()) openPicker(!stationLines(S.from).length ? 'from' : 'to', true);
     }
     M.refreshLine();
     await refreshTrains(fresh);
@@ -59,7 +60,7 @@ async function refresh(manual) {
   } catch (e) {
     S.err = e?.message || String(e);
     if (manual || !S.lastOk) toast(S.err);
-    if (e?.notFound) { store.del('line'); S.line = null; }
+    if (e?.notFound) forgetLines();
   } finally {
     busy = false;
     changed();
@@ -77,15 +78,16 @@ setInterval(() => {
 
 /* ================= animation: one loop for everything that moves ================= */
 addTask((t, dt) => {
-  const T = now(), y = yourTrain(), up = tripUp(), items = [];
+  const T = now(), y = yourTrain(), up = tripUp(), mine = new Set(tripLines()), items = [];
   let placed = false;
   for (const k in S.trains) {
     const v = S.trains[k], p = placeTrain(v, T, dt);
     if (!p) continue;
     if (!v.cur) placed = true;        // first time on the map: redraw the panel now, not at the next refresh
     v.cur = p;
-    items.push({ id: k, p, you: k === y?.v.tripId, sel: S.selected === k,
-      kind: k === y?.v.tripId ? 'you' : !gpsFresh(v) ? 'nogps' : isUp(v.dirId) === up ? 'live' : 'other' });
+    // 'live': a train you could take (your lines, your direction); 'other': every other train, in its line's colour
+    items.push({ id: k, p, route: v.route, you: k === y?.v.tripId, sel: S.selected === k,
+      kind: k === y?.v.tripId ? 'you' : !gpsFresh(v) ? 'nogps' : mine.has(v.route) && isUp(v.dirId, v.route) === up ? 'live' : 'other' });
   }
   const n = nextTrain(), m = n ? Math.round((n.t - now()) / 60000) : null;
   M.drawTrains(items, n ? 'Your train · ' + (m <= 0 ? 'now' : m + ' min') : 'Your train');
@@ -179,6 +181,7 @@ async function startFind(q) {
 }
 function endFind() { stopTracking(); setFollow(null); M.applyMode(); showStopBuses(); changed(); }
 function tripChanged() {
+  chooseLine(); S.viewLine = null;
   S.arr = null; S.selected = null; S.follow = false;
   M.refreshLine(); changed();
   if (S.view === 'line') buildDiagram();
@@ -213,7 +216,7 @@ function locate(fly) {
     if (first) {
       if (fly) M.flyTo(S.me, Math.max(M.zoom(), S.mode === 'buses' ? 15.5 : 14), 800);
       if (S.mode === 'buses') stopsAround(S.me.lat, S.me.lon, 700).then(() => { M.refreshStops(); changed(); }, () => {});
-      if (fly === 'near') { const i = nearestStation(S.me); if (i >= 0) pickStation(S.line.stations[i].name); }
+      if (fly === 'near') { const n = nearestStation(S.me); if (n) pickStation(n); }
     }
     first = false; changed();
   }, err => {
@@ -247,6 +250,7 @@ const ACTIONS = {
 };
 function wire() {
   initAppearance();
+  initLineTabs();
   body.addEventListener('click', e => {
     const it = e.target.closest('[data-it]');
     if (it && S.plan) { S.plan.sel = Number(it.dataset.it); M.refreshPlan(true); showPlanBuses(); changed(); trackPlanRides().then(changed); return; }
@@ -294,13 +298,13 @@ function wire() {
     closePanel('#settings'); kick();
   });
   $('#resetData').addEventListener('click', () => {
-    store.del('line'); store.del('snap'); S.line = null; S.trips = {}; S.trains = {}; S.arr = null;
+    forgetLines(); store.del('snap'); S.trips = {}; S.trains = {}; S.arr = null;
     closePanel('#settings'); kick();
   });
   $('#pickCancel').addEventListener('click', skipPicker);
   $('#pickSearch').addEventListener('input', renderPicker);
   $('#pickList').addEventListener('click', e => {
-    if (e.target.closest('[data-near]')) { if (S.me) { const i = nearestStation(S.me); if (i >= 0) pickStation(S.line.stations[i].name); } else locate('near'); return; }
+    if (e.target.closest('[data-near]')) { if (S.me) { const n = nearestStation(S.me); if (n) pickStation(n); } else locate('near'); return; }
     const b = e.target.closest('[data-st]'); if (b) pickStation(b.dataset.st);
   });
 
@@ -317,6 +321,8 @@ function wire() {
   on('mapMoved', () => { if (S.mode === 'buses') loadStopsInView(); });
   on('mapReady', () => { M.drawMe(); M.padding(); if (S.mode === 'buses') loadStopsInView(); });
   on('sheetMoved', () => M.padding());
+  // more lines finished loading in the background: draw them, and offer their stations
+  on('linesChanged', () => { M.refreshLine(); if (pickerOpen()) renderPicker(); if (S.view === 'line') buildDiagram(); changed(); });
 }
 
 /* ================= start ================= */
@@ -335,7 +341,7 @@ function start() {
   initSheet(); initPanels(); initDirections(() => M.center() || CFG.north); wire();
   document.body.classList.toggle('mode-bus', S.mode === 'buses');
   $$('.modeseg button').forEach(b => b.setAttribute('aria-selected', String(b.dataset.mode === S.mode)));
-  if (restoreLine()) setTimeout(() => loadLine(true).then(() => { M.refreshLine(); changed(); }, () => {}), 4000);   // week-old line data: refresh quietly
+  if (restoreLines()) setTimeout(() => loadLines(true).then(() => { M.refreshLine(); changed(); }, () => {}), 4000);   // week-old line data: refresh quietly
   loadSnapshot();
   render();
   try { M.initMap(); }
@@ -345,7 +351,7 @@ function start() {
     setTimeout(() => toast('Map unavailable on this device. Showing the line view.'), 600);
   }
   navigator.permissions?.query({ name: 'geolocation' }).then(p => { if (p.state === 'granted') locate(false); }, () => {}) ?? (store.get('locOk', false) && locate(false));
-  if (S.mode === 'trains' && S.line && !hasTrip()) openPicker(stationIdx(S.from) < 0 ? 'from' : 'to', true);
+  if (S.mode === 'trains' && S.line && !hasTrip()) openPicker(!stationLines(S.from).length ? 'from' : 'to', true);
   refresh(false);
   registerWorker();
 }

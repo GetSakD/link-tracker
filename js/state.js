@@ -9,7 +9,12 @@ export const S = {
   mode: store.get('mode', 'trains'),             // 'trains' | 'buses'
   from: store.get('from', null), to: store.get('to', null),
   // data from Sound Transit
-  line: null,          // stations, platforms, track shapes
+  lines: {},          // routeId -> train line: stations, platforms, directions
+  lineOrder: [],       // route ids in display order (1 Line, 2 Line, T Line, Sounder…)
+  railRoutes: new Set(),
+  line: null,          // the line your trip rides
+  shapes: {},          // shapeId -> track
+  viewLine: null,      // the line shown in the line diagram
   trips: {},           // tripId -> timetable
   stopInfo: {},        // stopId -> { name, lat, lon }
   routes: {},          // routeId -> route

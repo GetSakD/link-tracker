@@ -89,7 +89,7 @@ export async function findBus(q, center) {
         const rd = await oba('routes-for-location', { lat: center.lat.toFixed(5), lon: center.lon.toFixed(5), radius: 25000, query: /^[a-z]$/.test(want) ? want.toUpperCase() + ' Line' : want });
         for (const r of rd.list || []) { S.routes[r.id] = r; if (same(r)) ids.push(r.id); }
       }
-      ids = [...new Set(ids)].filter(id => !CFG.otherLinkRoutes.includes(id)).slice(0, 3);
+      ids = [...new Set(ids)].filter(id => !CFG.otherLinkRoutes.includes(id) && !S.railRoutes.has(id)).slice(0, 3);
       if (!ids.length) throw new Error('No route "' + q + '" found near you.');
       T.routes = ids;
       await loadRouteBuses(T);

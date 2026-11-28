@@ -1,8 +1,7 @@
-/* Live 2 Line trains and departures from your station. */
-import { CFG } from './config.js';
+/* Live trains on every line, and departures from your station. */
 import { S, now } from './state.js';
 import { oba, indexRefs, departures, passedStop } from './api.js';
-import { stationIdx, stationOfStop, shape, mainShape, ensureShape, shapeFailed, cacheTimetable, isUp, tripUp } from './line.js';
+import { stationIdx, stationOfStop, shape, mainShape, ensureShape, shapeFailed, cacheTimetable, isUp, tripUp, lineOf, tripLines, rideTo } from './line.js';
 import { Follower } from './motion.js';
 import { clamp, project, pointAt, headingAt, store } from './util.js';
 
@@ -25,8 +24,13 @@ function scheduleS(tt, tau) {
 }
 const modelS = (v, t) => { const tt = S.trips[v.tripId]; return tt ? scheduleS(tt, (t - tt.sd) / 1000 - v.dev) : null; };
 
+// the line a train or trip belongs to
+const lineFor = (route) => lineOf(route) || S.line;
+// is this stop at that station, on that line?
+const atStation = (stopId, name, L) => { const i = stationIdx(name, L); return i >= 0 && stationOfStop(stopId, L) === i; };
+
 export function trainShape(v) {
-  const L = S.line; if (!L) return null;
+  const L = lineFor(v.route); if (!L) return null;
   const id = S.trips[v.tripId]?.shapeId || v.shapeId;
   const sh = id && shape(id);
   if (sh) return sh;
@@ -73,30 +77,30 @@ export function placeTrain(v, t, dt) {
 
 /* ---------- the live feed ---------- */
 
-export function ingest(r) {
-  const refs = indexRefs(r.references), seen = {}, t = now();
+export function ingest(r, route, seen = {}) {
+  const refs = indexRefs(r.references), t = now();
   for (const e of r.list || []) {
     const tr0 = refs.trips[e.tripId];
-    if (e.schedule && tr0?.routeId === CFG.route && !S.trips[e.tripId]) cacheTimetable(e.tripId, e.schedule, e.serviceDate, tr0);
+    if (e.schedule && tr0?.routeId === route && !S.trips[e.tripId]) cacheTimetable(e.tripId, e.schedule, e.serviceDate, tr0);
     const st = e.status; if (!st) continue;
     if (st.activeTripId && st.activeTripId !== e.tripId) continue;   // describes another trip; that trip's entry shows it
     if (!st.predicted && !st.vehicleId) continue;                    // timetable-only ghost: no train is reporting
     const trip = refs.trips[e.tripId];
-    if (!trip || trip.routeId !== CFG.route) continue;               // same trains also run 1 Line trips
+    if (!trip || trip.routeId !== route) continue;                   // a train can run other lines' trips too
     if (seen[e.tripId] || /deadhead/i.test(st.phase || '') || /cancel/i.test(st.status || '')) continue;
     const gps = st.predicted && st.lastKnownLocation?.lat ? st.lastKnownLocation : null;
     const pos = gps || st.position; if (!pos) continue;
     seen[e.tripId] = 1;
     const v = S.trains[e.tripId] || (S.trains[e.tripId] = { tripId: e.tripId, f: new Follower({ backTolerance: 150 }), offset: 0 });
     Object.assign(v, {
-      headsign: trip.tripHeadsign || '', dirId: String(trip.directionId), shapeId: trip.shapeId,
+      route, headsign: trip.tripHeadsign || '', dirId: String(trip.directionId), shapeId: trip.shapeId,
       predicted: !!st.predicted, dev: st.scheduleDeviation || 0, sObs: st.distanceAlongTrip, total: st.totalDistanceAlongTrip,
       pos: { lat: pos.lat, lon: pos.lon }, gps: gps ? { lat: gps.lat, lon: gps.lon } : null,
       gpsAt: st.lastLocationUpdateTime || st.lastUpdateTime || 0, vehicleId: st.vehicleId || ''
     });
     anchor(v, t);
   }
-  for (const k in S.trains) if (!seen[k]) delete S.trains[k];
+  return seen;
 }
 
 const pendingTrips = {};
@@ -110,8 +114,18 @@ export async function fetchTrip(tripId) {
   } finally { delete pendingTrips[tripId]; }
 }
 
-export async function refreshTrains(prefetched) {
-  ingest(prefetched || await oba('trips-for-route/' + CFG.route, { includeStatus: 'true', includeSchedule: 'false' }));
+/* Every line's trains. A line whose request fails keeps the trains it had; the others still update. */
+export async function refreshTrains(prefetched = {}) {
+  const seen = {}, done = new Set();
+  let lastErr = null;
+  for (const route of S.lineOrder) {
+    try {
+      ingest(prefetched[route] || await oba('trips-for-route/' + route, { includeStatus: 'true', includeSchedule: 'false' }), route, seen);
+      done.add(route);
+    } catch (e) { lastErr = e; }
+  }
+  if (!done.size && lastErr) throw lastErr;
+  for (const k in S.trains) if (!seen[k] && (done.has(S.trains[k].route) || !S.trains[k].route)) delete S.trains[k];
   const need = [...new Set(Object.values(S.trains).map(v => S.trips[v.tripId]?.shapeId || v.shapeId).filter(id => id && !shape(id) && !shapeFailed(id)))];
   if (need.length) { await Promise.all(need.map(ensureShape)); for (const k in S.trains) anchor(S.trains[k], now()); }
   for (const id of Object.keys(S.trains).filter(k => !S.trips[k]).slice(0, 4)) { try { await fetchTrip(id); } catch { /* drawn at GPS until it loads */ } }
@@ -119,19 +133,32 @@ export async function refreshTrains(prefetched) {
 
 /* ---------- departures from your station ---------- */
 
-export const tripKey = () => S.from + '>' + S.to;
+export const tripKey = () => S.from + '>' + rideTo();
 
 export async function loadDepartures(onMore) {
-  const L = S.line, a = stationIdx(S.from), b = stationIdx(S.to);
-  if (!L || a < 0 || b < 0) return;
-  const up = b > a, st = L.stations[a], stopId = up ? (st.up || st.down) : (st.down || st.up), want = up ? L.dirUp : L.dirDown;
-  const { refs, rows } = await departures(stopId, 120);
+  const routes = tripLines();
+  if (!routes.length) return;
+  // each line that serves your trip: which platform, and which direction counts
+  const byStop = new Map();
+  for (const route of routes) {
+    const L = S.lines[route], a = stationIdx(S.from, L), b = stationIdx(rideTo(), L), up = b > a, st = L.stations[a];
+    const stopId = up ? (st.up || st.down) : (st.down || st.up);
+    if (!byStop.has(stopId)) byStop.set(stopId, []);
+    byStop.get(stopId).push({ route, want: up ? L.dirUp : L.dirDown });
+  }
   const t = now();
-  let list = rows.filter(x => x.routeId === CFG.route && x.departs && (x.dirId == null || x.dirId === want) && x.t >= t - HARD_CUTOFF_MS).sort((p, q) => p.t - q.t);
+  let list = [], situations = [];
+  for (const [stopId, wants] of byStop) {
+    const { refs, rows } = await departures(stopId, 120);
+    situations.push(...refs.situations);
+    list.push(...rows.filter(x => x.departs && x.t >= t - HARD_CUTOFF_MS && wants.some(w => w.route === x.routeId && (x.dirId == null || x.dirId === w.want))));
+  }
+  list.sort((p, q) => p.t - q.t);
   // the feed sometimes lists one train twice (status DUPLICATED): keep the real one
-  list = list.filter(x => !x.dup || !list.some(o => o !== x && !o.dup && ((x.vehicleId && o.vehicleId === x.vehicleId) || Math.abs(o.t - x.t) < 180000))).slice(0, 8);
+  list = list.filter(x => !x.dup || !list.some(o => o !== x && !o.dup && ((x.vehicleId && o.vehicleId === x.vehicleId) || Math.abs(o.t - x.t) < 180000))).slice(0, 10);
   S.arr = { key: tripKey(), at: t, list };
-  S.alerts = sortAlerts(refs.situations.filter(s => s?.summary?.value));
+  const seenAlert = new Set();
+  S.alerts = sortAlerts(situations.filter(s => s?.summary?.value && !seenAlert.has(s.id) && seenAlert.add(s.id)));
   for (const x of list.slice(0, 3)) { try { await fetchTrip(x.tripId); } catch { /* keep going */ } }
   const rest = list.slice(3).map(x => x.tripId).filter(id => !S.trips[id]);
   if (rest.length) setTimeout(async () => { for (const id of rest) { try { await fetchTrip(id); } catch { /* */ } } onMore?.(); }, 400);
@@ -139,7 +166,7 @@ export async function loadDepartures(onMore) {
 
 // alerts that name a station on your trip come first
 function sortAlerts(list) {
-  const a = stationIdx(S.from), b = stationIdx(S.to);
+  const a = stationIdx(S.from), b = stationIdx(rideTo());
   const names = S.line && a >= 0 && b >= 0 ? S.line.stations.slice(Math.min(a, b), Math.max(a, b) + 1).map(s => s.name.toLowerCase().split(/[ /]/)[0]) : [];
   list.forEach(s => { const txt = (s.summary.value + ' ' + (s.description?.value || '')).toLowerCase(); s.mine = names.some(n => n.length > 3 && txt.includes(n)); });
   return list.sort((x, y) => (y.mine ? 1 : 0) - (x.mine ? 1 : 0));
@@ -162,11 +189,12 @@ export function trainFor(x) {
 export function tripStart(x) {
   const tt = S.trips[x.tripId];
   if (tt?.st.length) return tt.sd + tt.st[0].d * 1000;
-  const a = stationIdx(S.from);
+  const L = lineFor(x.routeId);
   for (const k in S.trips) {                    // no timetable yet: borrow the running time from a trip going the same way
     const o = S.trips[k];
+    if (x.routeId && o.route && o.route !== x.routeId) continue;
     if (x.dirId && o.dirId && o.dirId !== x.dirId) continue;
-    const i = o.st.findIndex(s => stationOfStop(s.id) === a);
+    const i = o.st.findIndex(s => atStation(s.id, S.from, L));
     if (i >= 0) return (x.sched || x.t) - (o.st[i].d - o.st[0].d) * 1000;
   }
   return null;
@@ -181,12 +209,12 @@ export function isGhost(x) {
 
 // has the train for this row already gone past your station?
 export function trainPassed(x) {
-  const v = S.trains[x.tripId], up = mainShape(), a = stationIdx(S.from);
+  const v = S.trains[x.tripId], L = v && lineFor(v.route), up = mainShape(L), a = stationIdx(S.from, L);
   if (!v || !up || a < 0) return false;
   const p = gpsFresh(v) ? v.gps : v.cur;
   if (!p) return false;
-  const s = project(up, p).s, sa = S.line.stations[a].s;
-  return isUp(v.dirId) ? s > sa + 80 : s < sa - 80;
+  const s = project(up, p).s, sa = L.stations[a].s;
+  return isUp(v.dirId, v.route) ? s > sa + 80 : s < sa - 80;
 }
 
 export function isGone(x) {
@@ -210,23 +238,22 @@ export const unconfirmedBefore = n => n ? upcoming().filter(x => !x.canceled && 
 export const rowFor = tripId => S.arr?.key === tripKey() ? S.arr.list.find(x => x.tripId === tripId) || null : null;
 
 export function arrivalAt(x) {
-  const a = stationIdx(S.from), b = stationIdx(S.to), tt = S.trips[x.tripId];
+  const tt = S.trips[x.tripId], L = lineFor(tt?.route || x.routeId);
   if (tt) {
     let seenFrom = false;
     for (const s of tt.st) {
-      const k = stationOfStop(s.id);
-      if (k === a) seenFrom = true;
-      else if (k === b && seenFrom) return tt.sd + (s.a + x.dev) * 1000;
+      if (atStation(s.id, S.from, L)) seenFrom = true;
+      else if (seenFrom && atStation(s.id, rideTo(), L)) return tt.sd + (s.a + x.dev) * 1000;
     }
     return null;
   }
   // no timetable for this trip yet: use the travel time from any trip going the same way
   for (const k in S.trips) {
-    const st = S.trips[k].st; let ia = -1;
+    const o = S.trips[k]; if (x.routeId && o.route && o.route !== x.routeId) continue;
+    const st = o.st; let ia = -1;
     for (let i = 0; i < st.length; i++) {
-      const s = stationOfStop(st[i].id);
-      if (s === a && ia < 0) ia = i;
-      else if (s === b && ia >= 0) return x.t + (st[i].a - st[ia].d) * 1000;
+      if (ia < 0 && atStation(st[i].id, S.from, L)) ia = i;
+      else if (ia >= 0 && atStation(st[i].id, rideTo(), L)) return x.t + (st[i].a - st[ia].d) * 1000;
     }
   }
   return null;
@@ -237,13 +264,13 @@ export const yourTrain = () => trainFor(nextTrain());
 
 // "at Westlake" / "between X and Y", from where the train is drawn
 export function whereText(v) {
-  const L = S.line, up = mainShape(); if (!L || !up || !v.cur) return '';
+  const L = lineFor(v.route), up = mainShape(L); if (!L || !up || !v.cur) return '';
   const s = project(up, v.cur).s, st = L.stations, n = st.length;
   const at = st.find(x => Math.abs(x.s - s) < 130);
   if (at) return { kind: 'at', a: at.name };
   for (let i = 0; i < n - 1; i++) {
     if (s > Math.min(st[i].s, st[i + 1].s) && s < Math.max(st[i].s, st[i + 1].s)) {
-      const goingUp = isUp(v.dirId);
+      const goingUp = isUp(v.dirId, v.route);
       return { kind: 'between', a: (goingUp ? st[i] : st[i + 1]).name, b: (goingUp ? st[i + 1] : st[i]).name };
     }
   }
@@ -256,8 +283,8 @@ export const terminus = () => S.line?.stations.length ? (tripUp() ? S.line.stati
 export function saveSnapshot() {
   const trips = {}, trains = {};
   for (const k in S.trains) {
-    const { headsign, dirId, shapeId, predicted, dev, sObs, total, pos, gps, gpsAt } = S.trains[k];
-    trains[k] = { tripId: k, headsign, dirId, shapeId, predicted, dev, sObs, total, pos, gps, gpsAt };
+    const { route, headsign, dirId, shapeId, predicted, dev, sObs, total, pos, gps, gpsAt } = S.trains[k];
+    trains[k] = { tripId: k, route, headsign, dirId, shapeId, predicted, dev, sObs, total, pos, gps, gpsAt };
     if (S.trips[k]) trips[k] = S.trips[k];
   }
   S.arr?.list.forEach(x => { if (S.trips[x.tripId]) trips[x.tripId] = S.trips[x.tripId]; });
